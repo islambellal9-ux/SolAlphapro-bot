@@ -241,6 +241,28 @@ async def _gecko_wait() -> None:
         _GECKO["last"] = time.time()
 
 
+DEX_MIN_GAP = _env_float("DEX_MIN_GAP", 0.35)       # ثوانٍ بين أي طلبين لـ DexScreener (يمنع الدفعات المتزامنة)
+DEX_MAX_WAIT = _env_float("DEX_MAX_WAIT", 8)          # تبريد أطول من هذا ⇒ نتخطى DexScreener فوراً ويشتغل الاحتياط
+_DEX: dict = {"lock": None, "last": 0.0, "until": 0.0, "pen": 0}
+
+
+async def _dex_wait() -> bool:
+    """يُنظّم طلبات DexScreener. يرجع False إذا كان في تبريد طويل بعد 429 (نتخطاه بدل الانتظار)."""
+    if _DEX["lock"] is None:
+        _DEX["lock"] = asyncio.Lock()
+    if _DEX["until"] - time.time() > DEX_MAX_WAIT:
+        return False
+    async with _DEX["lock"]:
+        rem = _DEX["until"] - time.time()
+        if rem > 0:
+            await asyncio.sleep(rem)
+        gap = time.time() - _DEX["last"]
+        if gap < DEX_MIN_GAP:
+            await asyncio.sleep(DEX_MIN_GAP - gap)
+        _DEX["last"] = time.time()
+    return True
+
+
 async def fetch_json(
     client: httpx.AsyncClient,
     url: str,
@@ -248,26 +270,43 @@ async def fetch_json(
     headers: Optional[dict] = None,
     retries: int = 1,
 ) -> Any:
-    """طلب JSON بإعادة محاولة أسّية (1.5، 3، 6، 12… ثانية + jitter) عند 429 / 5xx / أخطاء الشبكة، مع احترام Retry-After."""
+    """طلب JSON بإعادة محاولة أسّية عند 429 / 5xx / أخطاء الشبكة، مع احترام Retry-After.
+    DexScreener: فاصل بين الطلبات + تبريد أسّي مشترك بعد 429 (8، 16، 32، 60ث) بدل الإلحاح عليه."""
     import random
+    is_dex = "api.dexscreener.com" in url
+    is_gecko = "geckoterminal" in url
     for attempt in range(retries + 1):
         try:
-            if "geckoterminal" in url:
+            if is_gecko:
                 await _gecko_wait()
+            elif is_dex:
+                if not await _dex_wait():
+                    _note_api(url, "HTTP 429 (تبريد)")
+                    return None
             r = await client.get(url, params=params, headers=headers)
             _note_api(url, f"HTTP {r.status_code}")
             if r.status_code == 429 or 500 <= r.status_code < 600:
-                if attempt >= retries:
-                    return None
                 try:
                     wait = float(r.headers.get("retry-after", "") or 0)
                 except (ValueError, AttributeError):
                     wait = 0.0
+                if r.status_code == 429:
+                    if is_dex:
+                        _DEX["pen"] = min(_DEX["pen"] + 1, 4)
+                        _DEX["until"] = time.time() + min(60.0, max(wait, 8.0 * (2 ** (_DEX["pen"] - 1))))
+                    elif is_gecko:
+                        _GECKO["last"] = time.time() + min(30.0, max(wait, 5.0))
+                if attempt >= retries:
+                    return None
+                if is_dex and r.status_code == 429:
+                    continue            # أول الحلقة: ينتظر التبريد أو يتخطى
                 await asyncio.sleep(min(30.0, max(1.5 * (2 ** attempt), wait)) + random.uniform(0, 0.5))
                 continue
             if r.status_code != 200:
                 log.warning("HTTP %s from %s", r.status_code, url)
                 return None
+            if is_dex:
+                _DEX["pen"] = 0
             return r.json()
         except ValueError:
             _note_api(url, "JSON غير صالح")
@@ -641,7 +680,16 @@ async def fetch_pairs(client: httpx.AsyncClient, addresses: list, pair_hints: An
         *(fetch_json(client, f"{DEX}/tokens/v1/solana/{','.join(c)}") for c in chunks)
     )
     _merge_pairs(best, list(responses))
-    if light:                                   # للمراقبة الدورية: بلا طلبات احتياطية إضافية
+    if light:                                   # للمراقبة الدورية: بلا طلبات احتياطية إضافية...
+        # ...إلا إذا فشلت دفعات DexScreener (429/خطأ): نكمّل من GeckoTerminal ما فشل فقط (سقف صغير)
+        failed = [a for c, r in zip(chunks, responses) if r is None for a in c if a not in best]
+        if failed:
+            try:
+                _merge_pairs(best, [await fetch_gecko_pairs(client, failed[:int(_env_float("LIGHT_GECKO_MAX", 90))])])
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("light gecko fallback failed")
         return list(best.values())
 
     # 2) DexScreener (endpoint القديم) لما لم يُحَل
@@ -2259,7 +2307,7 @@ async def discover_candidates(client: httpx.AsyncClient):
                                    ("gecko_trend_5m", "trending_pools", {"duration": "5m"}),
                                    ("gecko_trend_1h", "trending_pools", {"duration": "1h"})):
             try:
-                data = await asyncio.wait_for(fetch_json(client, f"{GECKO}/networks/solana/{path}", params=params), timeout=30)
+                data = await asyncio.wait_for(fetch_json(client, f"{GECKO}/networks/solana/{path}", params=params, retries=2), timeout=45)
                 res.append((name, _pool_mints(data) if isinstance(data, dict) else None))
             except Exception:
                 res.append((name, None))
@@ -2632,8 +2680,9 @@ async def scan_cycle(app: Application) -> dict:
                                   "candle_ts": 0.0, "sym": m["symbol"]})
         u["miss"] = 0
         u["lane"] = lane
+    fetch_healthy = (not all_addrs) or len(metrics) >= max(3, 0.3 * len(all_addrs))   # فشل الجلب ≠ غياب العملة
     for mint in list(uni):
-        if mint not in metrics:
+        if mint not in metrics and fetch_healthy:
             uni[mint]["miss"] = uni[mint].get("miss", 0) + 1
         if now - uni[mint]["added"] > SCAN_UNIVERSE_H * 3600 or uni[mint].get("miss", 0) >= 3:
             uni.pop(mint, None)
