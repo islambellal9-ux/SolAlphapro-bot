@@ -2200,7 +2200,7 @@ SCAN_CHAT_ID = int(os.getenv("SCAN_CHAT_ID", "0") or 0)
 SCAN_DEFAULT_ON = os.getenv("SCAN_DEFAULT_ON", "1") != "0"
 SCAN_INTERVAL_SEC = _env_float("SCAN_INTERVAL_SEC", 120)          # أسرع ليلتقط العملات الجديدة
 SCAN_HEARTBEAT_H = _env_float("SCAN_HEARTBEAT_H", 3)
-SCAN_CYCLE_TIMEOUT = _env_float("SCAN_CYCLE_TIMEOUT", 170)        # لا تتجاوز الدورة هذا الحد أبداً
+SCAN_CYCLE_TIMEOUT = _env_float("SCAN_CYCLE_TIMEOUT", 240)        # لا تتجاوز الدورة هذا الحد أبداً
 # مسار العملات المُثبّتة (جديدة نسبياً وكبيرة)
 SCAN_MIN_MC = _env_float("SCAN_MIN_MC", 60_000)
 SCAN_MAX_MC = _env_float("SCAN_MAX_MC", 100_000_000)
@@ -2236,6 +2236,7 @@ GUARD_FLASH_PCT = _env_float("GUARD_FLASH_PCT", 30)                     # هبو
 SCAN_RUG_PER_CYCLE = int(_env_float("SCAN_RUG_PER_CYCLE", 10))
 SCAN_CANDLES_PER_CYCLE = int(_env_float("SCAN_CANDLES_PER_CYCLE", 10))
 SCAN_MAX_DISCOVER = 240
+DISCOVER_TIMEOUT = _env_float("DISCOVER_TIMEOUT", 90)
 SCAN_UNIVERSE_H = 12
 SCAN_MOMENTUM = os.getenv("SCAN_MOMENTUM", "1") != "0"
 SCAN_MIN_SCORE = int(_env_float("SCAN_MIN_SCORE", 75))
@@ -2284,21 +2285,32 @@ def _pool_mints(data: Any) -> list:
     return out
 
 
-async def discover_candidates(client: httpx.AsyncClient):
+async def discover_candidates(client: httpx.AsyncClient, partial: Optional[dict] = None):
     """مصادر مجانية متوازية بمهلة لكل مصدر: GeckoTerminal (أحدث الأزواج صفحات 1–3 + Trending 5د/1س)
     و DexScreener (ملفات/تعزيزات). فشل أي مصدر لا يوقف البقية. يرجع (قائمة فريدة، {مصدر: عدد أو -1})."""
     found: dict = {}
     stats: dict = {}
+    if partial is not None:           # يراه scan_cycle حتى لو انتهت المهلة الكلية: نحتفظ بما وصل
+        partial["found"], partial["stats"] = found, stats
+
+    def _keep(name, mints):
+        stats[name] = len(mints) if mints is not None else -1
+        for a in mints or []:
+            found.setdefault(a, name)
 
     async def dex(name: str, url: str):
         try:
             data = await asyncio.wait_for(fetch_json(client, url), timeout=25)
         except Exception:
+            _keep(name, None)
             return name, None
         if not isinstance(data, list):
+            _keep(name, None)
             return name, None
-        return name, [str(x["tokenAddress"]) for x in data
-                      if isinstance(x, dict) and x.get("chainId") == "solana" and x.get("tokenAddress")]
+        mints = [str(x["tokenAddress"]) for x in data
+                 if isinstance(x, dict) and x.get("chainId") == "solana" and x.get("tokenAddress")]
+        _keep(name, mints)
+        return name, mints
 
     async def gecko_all():
         res = []
@@ -2307,10 +2319,13 @@ async def discover_candidates(client: httpx.AsyncClient):
                                    ("gecko_trend_5m", "trending_pools", {"duration": "5m"}),
                                    ("gecko_trend_1h", "trending_pools", {"duration": "1h"})):
             try:
-                data = await asyncio.wait_for(fetch_json(client, f"{GECKO}/networks/solana/{path}", params=params, retries=2), timeout=45)
-                res.append((name, _pool_mints(data) if isinstance(data, dict) else None))
+                data = await asyncio.wait_for(fetch_json(client, f"{GECKO}/networks/solana/{path}", params=params), timeout=25)
+                mm = _pool_mints(data) if isinstance(data, dict) else None
+                res.append((name, mm))
+                _keep(name, mm)
             except Exception:
                 res.append((name, None))
+                _keep(name, None)
         return res
 
     tasks = [dex("dex_profiles", f"{DEX}/token-profiles/latest/v1"),
@@ -2639,11 +2654,12 @@ async def scan_cycle(app: Application) -> dict:
     uni: dict = sc.setdefault("uni", {})
 
     # 1) اكتشاف (مصادر متوازية، لا يوقفه فشل أي مصدر)
+    part: dict = {}
     try:
-        addrs, st["sources"] = await asyncio.wait_for(discover_candidates(client), timeout=70)
-    except Exception:
-        log.exception("discovery failed")
-        addrs, st["sources"] = [], {}
+        addrs, st["sources"] = await asyncio.wait_for(discover_candidates(client, part), timeout=DISCOVER_TIMEOUT)
+    except Exception as e:
+        log.warning("discovery timed out/failed (%s) — using partial results", type(e).__name__)
+        addrs, st["sources"] = list((part.get("found") or {}).keys()), dict(part.get("stats") or {})
     addrs = [a for a in addrs if is_valid_solana_address(a) and a not in EXCLUDED_MINTS][:SCAN_MAX_DISCOVER]
     st["discovered"] = len(addrs)
     st["phases"]["discover"] = round(time.time() - t0, 1)
