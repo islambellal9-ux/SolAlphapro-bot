@@ -227,21 +227,31 @@ def api_status_text() -> str:
     return "\n".join(lines) if lines else "• لا توجد معلومات عن حالة المصادر بعد"
 
 
-GECKO_MIN_GAP = _env_float("GECKO_MIN_GAP", 2.1)       # ثوانٍ بين أي طلبين لـ GeckoTerminal (الحد 30/د)
-_GECKO: dict = {"lock": None, "last": 0.0}
+GECKO_MIN_GAP = _env_float("GECKO_MIN_GAP", 6.5)       # ≈9 طلب/د: الحد الفعلي للـAPI المجاني بلا مفتاح ~10/د (وثائق CoinGecko)
+_GECKO: dict = {"lock": None, "last": 0.0, "until": 0.0, "pen": 0}
 
 
-async def _gecko_wait() -> None:
+def gecko_open() -> bool:
+    """True = قاطع الدائرة مفتوح (بعد 429): لا نرسل طلباً لـ GeckoTerminal حتى ينتهي التبريد."""
+    return _GECKO["until"] > time.time()
+
+
+async def _gecko_wait() -> bool:
+    if gecko_open():
+        return False
     if _GECKO["lock"] is None:
         _GECKO["lock"] = asyncio.Lock()
     async with _GECKO["lock"]:
+        if gecko_open():
+            return False
         gap = time.time() - _GECKO["last"]
         if gap < GECKO_MIN_GAP:
             await asyncio.sleep(GECKO_MIN_GAP - gap)
         _GECKO["last"] = time.time()
+    return True
 
 
-DEX_MIN_GAP = _env_float("DEX_MIN_GAP", 0.35)       # ثوانٍ بين أي طلبين لـ DexScreener (يمنع الدفعات المتزامنة)
+DEX_MIN_GAP = _env_float("DEX_MIN_GAP", 0.5)       # ثوانٍ بين أي طلبين لـ DexScreener (يمنع الدفعات المتزامنة)
 DEX_MAX_WAIT = _env_float("DEX_MAX_WAIT", 8)          # تبريد أطول من هذا ⇒ نتخطى DexScreener فوراً ويشتغل الاحتياط
 _DEX: dict = {"lock": None, "last": 0.0, "until": 0.0, "pen": 0}
 
@@ -278,7 +288,10 @@ async def fetch_json(
     for attempt in range(retries + 1):
         try:
             if is_gecko:
-                await _gecko_wait()
+                if not await _gecko_wait():
+                    _note_api(url, "HTTP 429 (تبريد)")
+                    return None
+                headers = {**(headers or {}), "Accept": "application/json;version=20230302"}
             elif is_dex:
                 if not await _dex_wait():
                     _note_api(url, "HTTP 429 (تبريد)")
@@ -293,12 +306,13 @@ async def fetch_json(
                 if r.status_code == 429:
                     if is_dex:
                         _DEX["pen"] = min(_DEX["pen"] + 1, 4)
-                        _DEX["until"] = time.time() + min(60.0, max(wait, 8.0 * (2 ** (_DEX["pen"] - 1))))
+                        _DEX["until"] = time.time() + min(180.0, max(wait, 15.0 * (2 ** (_DEX["pen"] - 1))))
                     elif is_gecko:
-                        _GECKO["last"] = time.time() + min(30.0, max(wait, 5.0))
+                        _GECKO["pen"] = min(_GECKO["pen"] + 1, 4)
+                        _GECKO["until"] = time.time() + min(300.0, max(wait, 30.0 * (2 ** (_GECKO["pen"] - 1))))
                 if attempt >= retries:
                     return None
-                if is_dex and r.status_code == 429:
+                if (is_dex or is_gecko) and r.status_code == 429:
                     continue            # أول الحلقة: ينتظر التبريد أو يتخطى
                 await asyncio.sleep(min(30.0, max(1.5 * (2 ** attempt), wait)) + random.uniform(0, 0.5))
                 continue
@@ -307,6 +321,8 @@ async def fetch_json(
                 return None
             if is_dex:
                 _DEX["pen"] = 0
+            elif is_gecko:
+                _GECKO["pen"] = 0
             return r.json()
         except ValueError:
             _note_api(url, "JSON غير صالح")
@@ -538,7 +554,7 @@ async def _read_http(client: httpx.AsyncClient, info: dict, cutoff: float, error
             if oldest is not None and oldest < cutoff:
                 break
             before = min(m["id"] for m in page)
-            await asyncio.sleep(45)
+            await asyncio.sleep(0.3)
         if reached:
             info["source"] = f"HTTP ({host})"
             return msgs, True
@@ -683,9 +699,9 @@ async def fetch_pairs(client: httpx.AsyncClient, addresses: list, pair_hints: An
     if light:                                   # للمراقبة الدورية: بلا طلبات احتياطية إضافية...
         # ...إلا إذا فشلت دفعات DexScreener (429/خطأ): نكمّل من GeckoTerminal ما فشل فقط (سقف صغير)
         failed = [a for c, r in zip(chunks, responses) if r is None for a in c if a not in best]
-        if failed:
+        if failed and not gecko_open():
             try:
-                _merge_pairs(best, [await fetch_gecko_pairs(client, failed[:int(_env_float("LIGHT_GECKO_MAX", 90))])])
+                _merge_pairs(best, [await fetch_gecko_pairs(client, failed[:int(_env_float("LIGHT_GECKO_MAX", 30))])])
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -1051,7 +1067,23 @@ def fib_params(tf: int):
     return (25, 120, 60) if tf == 1 else (MIN_CANDLES, MAX_WINDOW_CANDLES, SWING_LOOKBACK_CANDLES)
 
 
+_CANDLE_CACHE: dict = {}
+
+
 async def fetch_candles(client: httpx.AsyncClient, pool: str, tf: int = 5, limit: Optional[int] = None) -> list:
+    ck = (pool, tf, limit)
+    hit = _CANDLE_CACHE.get(ck)
+    if hit and time.time() - hit[0] < 75:
+        return hit[1]
+    candles = await _fetch_candles_raw(client, pool, tf, limit)
+    if candles:
+        if len(_CANDLE_CACHE) > 150:
+            _CANDLE_CACHE.clear()
+        _CANDLE_CACHE[ck] = (time.time(), candles)
+    return candles
+
+
+async def _fetch_candles_raw(client: httpx.AsyncClient, pool: str, tf: int = 5, limit: Optional[int] = None) -> list:
     data = await fetch_json(
         client,
         f"{GECKO}/networks/solana/pools/{pool}/ohlcv/minute",
@@ -1769,7 +1801,7 @@ async def safe_send(msg, text: str) -> None:
 WATCH_INTERVAL_SEC = _env_float("WATCH_INTERVAL_SEC", 45)
 WATCH_TTL_HOURS = _env_float("WATCH_TTL_HOURS", 8)
 WATCH_MAX_PER_USER = int(_env_float("WATCH_MAX_PER_USER", 30))
-WATCH_CANDLES_PER_CYCLE = int(_env_float("WATCH_CANDLES_PER_CYCLE", 6))
+WATCH_CANDLES_PER_CYCLE = int(_env_float("WATCH_CANDLES_PER_CYCLE", 2))
 WATCH_SEC_PER_CYCLE = int(_env_float("WATCH_SEC_PER_CYCLE", 4))
 BOUNCE_MIN_PCT = _env_float("BOUNCE_MIN_PCT", 3)          # أقل ارتداد من القاع لاعتباره بدأ (كان 4)
 BOUNCE_MAX_PCT = _env_float("BOUNCE_MAX_PCT", 25)         # أكثر منه = فات الدخول المبكر
@@ -2234,7 +2266,7 @@ GUARD_INTERVAL_SEC = _env_float("GUARD_INTERVAL_SEC", 15)               # حار
 GUARD_LIQ_DROP_PCT = _env_float("GUARD_LIQ_DROP_PCT", 35)               # سحب سيولة بعد الدخول
 GUARD_FLASH_PCT = _env_float("GUARD_FLASH_PCT", 30)                     # هبوط حاد خلال 4 دقائق
 SCAN_RUG_PER_CYCLE = int(_env_float("SCAN_RUG_PER_CYCLE", 10))
-SCAN_CANDLES_PER_CYCLE = int(_env_float("SCAN_CANDLES_PER_CYCLE", 10))
+SCAN_CANDLES_PER_CYCLE = int(_env_float("SCAN_CANDLES_PER_CYCLE", 6))
 SCAN_MAX_DISCOVER = 240
 DISCOVER_TIMEOUT = _env_float("DISCOVER_TIMEOUT", 90)
 ALPHA_OFFPEAK_PCT = _env_float("ALPHA_OFFPEAK_PCT", 25)      # السعر تحت قمة آخر 45د بهذه النسبة ⇒ وسم تحذير + خروج سريع (لا يمنع الإشارة)
@@ -2291,6 +2323,9 @@ def _pool_mints(data: Any) -> list:
     return out
 
 
+_DISC: dict = {"n": 0}
+
+
 async def discover_candidates(client: httpx.AsyncClient, partial: Optional[dict] = None):
     """مصادر مجانية متوازية بمهلة لكل مصدر: GeckoTerminal (أحدث الأزواج صفحات 1–3 + Trending 5د/1س)
     و DexScreener (ملفات/تعزيزات). فشل أي مصدر لا يوقف البقية. يرجع (قائمة فريدة، {مصدر: عدد أو -1})."""
@@ -2320,10 +2355,10 @@ async def discover_candidates(client: httpx.AsyncClient, partial: Optional[dict]
 
     async def gecko_all():
         res = []
-        for name, path, params in (("gecko_new_1", "new_pools", {"page": 1}), ("gecko_new_2", "new_pools", {"page": 2}),
-                                   ("gecko_new_3", "new_pools", {"page": 3}),
-                                   ("gecko_trend_5m", "trending_pools", {"duration": "5m"}),
-                                   ("gecko_trend_1h", "trending_pools", {"duration": "1h"})):
+        _extra = (("gecko_new_2", "new_pools", {"page": 2}), ("gecko_new_3", "new_pools", {"page": 3}),
+                  ("gecko_trend_1h", "trending_pools", {"duration": "1h"}))[_DISC["n"] % 3]
+        for name, path, params in (("gecko_new_1", "new_pools", {"page": 1}),
+                                   ("gecko_trend_5m", "trending_pools", {"duration": "5m"}), _extra):
             try:
                 data = await asyncio.wait_for(fetch_json(client, f"{GECKO}/networks/solana/{path}", params=params), timeout=25)
                 mm = _pool_mints(data) if isinstance(data, dict) else None
@@ -2334,9 +2369,12 @@ async def discover_candidates(client: httpx.AsyncClient, partial: Optional[dict]
                 _keep(name, None)
         return res
 
-    tasks = [dex("dex_profiles", f"{DEX}/token-profiles/latest/v1"),
-             dex("dex_boosts", f"{DEX}/token-boosts/latest/v1"),
-             dex("dex_boosts_top", f"{DEX}/token-boosts/top/v1")]
+    _DISC["n"] += 1
+    tasks = []
+    if _DISC["n"] % 2 == 1:        # مصادر الملفات/التعزيزات (حد 60/د) كل دورة ثانية فقط
+        tasks = [dex("dex_profiles", f"{DEX}/token-profiles/latest/v1"),
+                 dex("dex_boosts", f"{DEX}/token-boosts/latest/v1"),
+                 dex("dex_boosts_top", f"{DEX}/token-boosts/top/v1")]
     results = await asyncio.gather(*tasks, gecko_all(), return_exceptions=True)
     ordered = []
     for r in results:
@@ -2754,6 +2792,7 @@ async def scan_cycle(app: Application) -> dict:
         if mm:
             metrics[mm["mint"]] = mm
     st["metrics"] = len(metrics)
+    sc["empty"] = not metrics            # دورة بلا أي بيانات (غالباً 429) ⇒ تراجع أسّي في الحلقة
     st["phases"]["metrics"] = round(time.time() - t1, 1)
     await scan_track_positions(app, sc, metrics)
     shadow_update(sc, metrics, now)
@@ -2836,6 +2875,9 @@ async def scan_cycle(app: Application) -> dict:
     # 6) تحليل واستراتيجية حسب نوع السوق
     t3 = time.time()
     for _, mint in picks[:SCAN_CANDLES_PER_CYCLE]:
+        if gecko_open():
+            st["skipped"]["GeckoTerminal في تبريد"] = st["skipped"].get("GeckoTerminal في تبريد", 0) + 1
+            break
         if time.time() - t0 > SCAN_CYCLE_TIMEOUT - 25:
             st["skipped"]["نفاد وقت الدورة"] = st["skipped"].get("نفاد وقت الدورة", 0) + 1
             break
@@ -3029,7 +3071,7 @@ def scan_status_text(sc: dict) -> str:
 
 async def scan_loop(app: Application) -> None:
     """حلقة مستقلة: كل دورة بمهلة صارمة، وأي فشل لا يوقفها، وتنام دائماً بين الدورات."""
-    await asyncio.sleep(30)
+    await asyncio.sleep(75)
     while True:
         sc = app.bot_data.setdefault("scan", {"on": SCAN_DEFAULT_ON, "chat": 0})
         try:
@@ -3037,7 +3079,7 @@ async def scan_loop(app: Application) -> None:
                 first = not sc.get("ok_ts")
                 await asyncio.wait_for(scan_cycle(app), timeout=SCAN_CYCLE_TIMEOUT)
                 sc["ok_ts"] = time.time()
-                sc["fails"] = 0
+                sc["fails"] = min(sc.get("fails", 0) + 1, 3) if sc.pop("empty", False) else 0
                 if first or time.time() - sc.get("hb_ts", 0) > SCAN_HEARTBEAT_H * 3600:
                     sc["hb_ts"] = time.time()
                     head = ("✅ <b>بدأ مسح السوق 24/24</b> — يعمل وحده ويرسل الصفقات هنا.\n\n" if first
@@ -3356,7 +3398,7 @@ async def watch_cycle(app: Application) -> None:
                 raise
             except Exception:
                 log.exception("rugcheck recheck failed")
-        if it.get("setup") or candle_budget <= 0 or m["price"] <= 0:
+        if it.get("setup") or candle_budget <= 0 or m["price"] <= 0 or gecko_open():
             continue
         candle_budget -= 1
         it["candle_ts"] = time.time()
@@ -3408,7 +3450,7 @@ async def watch_cycle(app: Application) -> None:
 
 async def watch_loop(app: Application) -> None:
     bd = app.bot_data
-    await asyncio.sleep(20)
+    await asyncio.sleep(40)
     while True:
         try:
             await watch_cycle(app)
