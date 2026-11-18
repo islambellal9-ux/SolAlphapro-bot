@@ -538,7 +538,7 @@ async def _read_http(client: httpx.AsyncClient, info: dict, cutoff: float, error
             if oldest is not None and oldest < cutoff:
                 break
             before = min(m["id"] for m in page)
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(45)
         if reached:
             info["source"] = f"HTTP ({host})"
             return msgs, True
