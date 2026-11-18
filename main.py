@@ -1670,7 +1670,7 @@ WELCOME = (
 )
 
 HELP = (
-    "🤖 <b>مسح السوق 24/24</b> يعمل تلقائياً ومستقلاً عن قائمتك: يلتقط العملات الناشئة (دقائق، MC 30–250K) والمُثبّتة بفحص أمني صارم وزخم حقيقي ويرسل الصفقات بحسب نوع السوق. القائمة تُنظَّف تلقائياً من العملات المنهارة/المشبوهة. كل صفقة تحمل «مخاطرة Rug» (نشاط متراجع، مالكون قليلون، صعود قطعي، سيولة رقيقة) مع خروج سريع TP0، وحارس يراقب الصفقات المفتوحة كل 25 ثانية وينبّه فوراً عند سحب السيولة. /scan الحالة، /scan_now فحص فوري، /scan_off إيقاف، /scan_on لتحويله إلى محادثة/مجموعة أخرى.\n\n"
+    "🤖 <b>مسح السوق 24/24</b> يعمل تلقائياً ومستقلاً عن قائمتك: يلتقط العملات الناشئة (دقائق، MC 30–250K) والمُثبّتة بفحص أمني صارم وزخم حقيقي ويرسل الصفقات بحسب نوع السوق. القائمة تُنظَّف تلقائياً من العملات المنهارة/المشبوهة. كل صفقة تحمل «مخاطرة Rug» (نشاط متراجع، مالكون قليلون، صعود قطعي، سيولة رقيقة) مع خروج سريع TP0، وحارس يراقب الصفقات المفتوحة كل ~15 ثانية وينبّه فوراً عند سحب السيولة. /scan الحالة، /scan_now فحص فوري، /scan_off إيقاف، /scan_on لتحويله إلى محادثة/مجموعة أخرى. /missed الفرص التي فاتت وسبب عدم إرسالها.\n\n"
     "📤 <b>/export</b>: ملف شموع الدقيقة والإشارات لمعايرة كاشف الارتداد على كل عملاتك (أرسله لي).\n\n"
     "📍 <b>الدعم</b>: كل ارتداد مؤكد يُرسل لك كما هو، ويُوسم بقوة الدعم (✅ قوي / ⚠️ ضعيف) مع أقرب دعم تحته، وأنبّهك عند اقتراب السعر من دعم قوي. "
     "العملات لا تُحذف من القائمة تلقائياً إلا بانتهاء المدة (8 ساعات).\n\n"
@@ -2230,13 +2230,19 @@ SCAN_MAX_HIGHRISK_HOUR = int(_env_float("SCAN_MAX_HIGHRISK_HOUR", 2))   # صفق
 ALPHA_MIN_HOLDERS = _env_float("ALPHA_MIN_HOLDERS", 60)                 # عدد مالكين أدنى (من RugCheck)
 RISK_HIGH_PTS = int(_env_float("RISK_HIGH_PTS", 5))
 RISK_MED_PTS = int(_env_float("RISK_MED_PTS", 3))
-GUARD_INTERVAL_SEC = _env_float("GUARD_INTERVAL_SEC", 25)               # حارس الصفقات المفتوحة
+GUARD_INTERVAL_SEC = _env_float("GUARD_INTERVAL_SEC", 15)               # حارس الصفقات المفتوحة
 GUARD_LIQ_DROP_PCT = _env_float("GUARD_LIQ_DROP_PCT", 35)               # سحب سيولة بعد الدخول
 GUARD_FLASH_PCT = _env_float("GUARD_FLASH_PCT", 30)                     # هبوط حاد خلال 4 دقائق
 SCAN_RUG_PER_CYCLE = int(_env_float("SCAN_RUG_PER_CYCLE", 10))
 SCAN_CANDLES_PER_CYCLE = int(_env_float("SCAN_CANDLES_PER_CYCLE", 10))
 SCAN_MAX_DISCOVER = 240
 DISCOVER_TIMEOUT = _env_float("DISCOVER_TIMEOUT", 90)
+ALPHA_OFFPEAK_PCT = _env_float("ALPHA_OFFPEAK_PCT", 25)      # السعر تحت قمة آخر 45د بهذه النسبة ⇒ وسم تحذير + خروج سريع (لا يمنع الإشارة)
+SCAN_BOUNCE_MIN_RR = _env_float("SCAN_BOUNCE_MIN_RR", 0)     # 0 = معطّل (لا حجب). مثال 0.9: يتجاهل ارتدادات R:R أقل من 0.9
+RE_VET_MIN = _env_float("RE_VET_MIN", 15)                    # إعادة الفحص الأمني للعملات التي فشلت سابقاً (دقائق)
+SHADOW_TTL_H = _env_float("SHADOW_TTL_H", 6)                 # تتبّع العملات التي لم تُرسَل (لأمر /missed)
+SHADOW_MAX = 500
+SHADOW_MIN_GAIN = _env_float("SHADOW_MIN_GAIN", 40)          # اعتبار الفرصة فاتت إذا ركضت هذا الحد بعد رؤيتها
 SCAN_UNIVERSE_H = 12
 SCAN_MOMENTUM = os.getenv("SCAN_MOMENTUM", "1") != "0"
 SCAN_MIN_SCORE = int(_env_float("SCAN_MIN_SCORE", 75))
@@ -2490,6 +2496,71 @@ def quick_exit_line(lvl: str, entry: float) -> str:
             "النشاط المتراجع قد ينتهي بـRug بعد القمة.\n")
 
 
+def offpeak_pct(candles: list, price: float, lookback: int = 45) -> float:
+    """كم نسبة السعر الحالي تحت أعلى سعر في آخر ~45 شمعة دقيقة (0 إذا لا شموع)."""
+    try:
+        if not candles or price <= 0:
+            return 0.0
+        hi = max(c[2] for c in candles[-lookback:])
+        return max(0.0, (hi - price) / hi * 100) if hi > 0 else 0.0
+    except Exception:
+        return 0.0
+
+
+def shadow_note(sc: dict, m: dict, why: str, stage: str) -> None:
+    """يسجّل عملة نشطة لم نرسلها (السعر عند أول رؤية) لنعرف لاحقاً إن كانت فرصة فاتت ولماذا."""
+    sh = sc.setdefault("shadow", {})
+    e = sh.get(m["mint"])
+    if e is None:
+        if len(sh) >= SHADOW_MAX:
+            sh.pop(min(sh, key=lambda k: sh[k]["t0"]), None)
+        sh[m["mint"]] = {"sym": m["symbol"], "t0": time.time(), "p0": m["price"], "mc0": m["mcap"],
+                         "pmax": m["price"], "age0": m.get("age_min"), "why": why, "stage": stage}
+    else:
+        e["why"], e["stage"] = why, stage          # آخر سبب؛ السعر المرجعي يبقى أول رؤية
+
+
+def shadow_watch(sc: dict, limit: int = 60) -> list:
+    sh = sc.get("shadow") or {}
+    now = time.time()
+    recent = [k for k, e in sh.items() if now - e["t0"] < 3 * 3600]
+    recent.sort(key=lambda k: -sh[k]["t0"])
+    return recent[:limit]
+
+
+def shadow_update(sc: dict, metrics: dict, now: float) -> None:
+    sh = sc.get("shadow")
+    if not sh:
+        return
+    for mint in list(sh):
+        e = sh[mint]
+        if now - e["t0"] > SHADOW_TTL_H * 3600:
+            sh.pop(mint, None)
+            continue
+        m = metrics.get(mint)
+        if m and m["price"] > 0 and m["price"] > e["pmax"]:
+            e["pmax"] = m["price"]
+
+
+def scan_why_not(m: dict, u: dict, lane: str, picked: bool, tried: bool) -> tuple:
+    """لماذا لم تُرسَل هذه العملة؟ (نص، مرحلة)."""
+    if u.get("sec_ok") is None:
+        return "بانتظار الفحص الأمني (طابور)", "طابور الفحص"
+    if u.get("sec_ok") is False:
+        return "فحص أمني: " + (u.get("sec_txt") or "فشل")[:70], "الفحص الأمني"
+    if lane == "alpha":
+        h = u.get("holders")
+        if h is not None and h < ALPHA_MIN_HOLDERS:
+            return f"مالكون قليلون ({h:.0f})", "مالكون"
+        if not alpha_ok(m):
+            return (f"زخم غير كافٍ (5د {m['chg5']:+.0f}% • 1س {m['chg1']:+.0f}% • شراء {m['buy_ratio5'] * 100:.0f}%)", "الزخم")
+    if not picked:
+        return "لا ارتداد ولا زخم (قبل الشموع)", "لا إعداد"
+    if not tried:
+        return "ازدحام: خارج أفضل الدفعة", "ازدحام"
+    return "حُلّلت بالشموع ولم تُرسَل (إعداد/درجة/مخاطرة)", "التحليل"
+
+
 def scan_header(label: str, regime: dict) -> str:
     st = SCAN_REGIME_LABEL.get(regime["state"], "")
     extra = ""
@@ -2631,6 +2702,7 @@ async def _vet(client: httpx.AsyncClient, mint: str, m: dict, u: dict, st: dict)
         u["tries"] += 1
         if u["tries"] >= 6:
             u["sec_ok"], u["sec_txt"] = False, "تعذر جلب تقرير RugCheck"
+            u["vet_ts"] = time.time()
             st["vet_fail"] += 1
         return
     sec = analyze_security(report, m["pair"])
@@ -2640,6 +2712,7 @@ async def _vet(client: httpx.AsyncClient, mint: str, m: dict, u: dict, st: dict)
     ok = scan_secure(sec)
     u["sec_ok"], u["sec_obj"], u["sec_txt"] = ok, sec, sec_brief(sec)
     if not ok:
+        u["vet_ts"] = time.time()
         st["vet_fail"] += 1
 
 
@@ -2666,7 +2739,9 @@ async def scan_cycle(app: Application) -> dict:
 
     # 2) بيانات السوق: المكتشف + الكون + صفقات المسح المفتوحة
     t1 = time.time()
-    all_addrs = list(dict.fromkeys(addrs + list(uni) + list((sc.get("pos") or {}))))[:260]
+    _sw = shadow_watch(sc)
+    all_addrs = list(dict.fromkeys(addrs + list(uni) + list((sc.get("pos") or {})) + _sw))[:320]
+    shadow_only = set(_sw) - set(addrs) - set(uni) - set(sc.get("pos") or {})
     sink: dict = {}
     if all_addrs:
         try:
@@ -2681,15 +2756,20 @@ async def scan_cycle(app: Application) -> dict:
     st["metrics"] = len(metrics)
     st["phases"]["metrics"] = round(time.time() - t1, 1)
     await scan_track_positions(app, sc, metrics)
+    shadow_update(sc, metrics, now)
 
     # 3) تصنيف المسارات + إدارة الكون
     lanes: dict = {}
     reasons: Counter = Counter()
     for mint, m in metrics.items():
+        if mint in shadow_only:          # جُلبت فقط لتتبّع الفرص الفائتة: لا تدخل الكون
+            continue
         lane, why = scan_lane(m)
         if not lane:
             reasons[why] += 1
             uni.pop(mint, None)
+            if m["price"] > 0 and m["vol1"] >= 2000 and (m["chg1"] >= 15 or m["chg5"] >= 8):
+                shadow_note(sc, m, why, "فلتر المسار")
             continue
         lanes[mint] = lane
         u = uni.setdefault(mint, {"added": now, "sec_ok": None, "sec_obj": None, "sec_txt": "", "tries": 0,
@@ -2711,6 +2791,12 @@ async def scan_cycle(app: Application) -> dict:
     sc["regime"] = regime
 
     # 4) فحص أمني أصرم متوازٍ (دفعة صغيرة + مهلة)، الناشئة أولاً
+    for _mt, _u in uni.items():          # إعادة فحص العملات التي فشلت سابقاً (قد تنظّف/يتغيّر وضعها) — إضافة لا حجب
+        if (_u.get("sec_ok") is False and _mt in lanes and _u.get("vet_n", 0) < 3
+                and now - _u.get("vet_ts", now) >= RE_VET_MIN * 60):
+            _m = metrics[_mt]
+            if alpha_ok(_m) if lanes[_mt] == "alpha" else (bounce_prescreen(_m) > 0 or momentum_ok(_m)):
+                _u["sec_ok"], _u["tries"], _u["vet_n"] = None, 0, _u.get("vet_n", 0) + 1
     t2 = time.time()
     todo = sorted((mt for mt, u in uni.items() if u["sec_ok"] is None and mt in lanes),
                   key=lambda mt: (0 if lanes[mt] == "alpha" else 1, -metrics[mt]["vol1"]))[:SCAN_RUG_PER_CYCLE]
@@ -2791,6 +2877,20 @@ async def scan_cycle(app: Application) -> dict:
             sc.setdefault("alerts", []).append(time.time())
             sc.setdefault("cool", {})[mint] = time.time()
         await asyncio.sleep(0.3)
+    try:
+        _pickset = {mt for _, mt in picks}
+        _tried = {mt for _, mt in picks[:SCAN_CANDLES_PER_CYCLE]}
+        _cool, _posd = sc.get("cool") or {}, sc.get("pos") or {}
+        for mint, lane in lanes.items():
+            m, u = metrics.get(mint), uni.get(mint)
+            if not m or not u or mint in _cool or mint in _posd:
+                continue
+            if m["vol1"] < 3000 or not (m["chg5"] >= 2 or m["chg1"] >= 8):
+                continue
+            _w, _stg = scan_why_not(m, u, lane, mint in _pickset, mint in _tried)
+            shadow_note(sc, m, _w, _stg)
+    except Exception:
+        log.exception("shadow notes failed")
     st["phases"]["analyze"] = round(time.time() - t3, 1)
     st["phases"]["total"] = round(time.time() - t0, 1)
     sc["last"] = st
@@ -2799,6 +2899,8 @@ async def scan_cycle(app: Application) -> dict:
 
 async def scan_send_bounce(app, sc: dict, u: dict, m: dict, setup: dict, candles: list, regime: dict, chat: int) -> bool:
     bd = app.bot_data
+    if SCAN_BOUNCE_MIN_RR > 0 and (setup.get("rr1") or 0) < SCAN_BOUNCE_MIN_RR:
+        return False
     lvl, rtxt, ok = scan_risk_gate(sc, u, m)
     if not ok:
         return False
@@ -2835,10 +2937,15 @@ async def scan_send_momentum(app, sc: dict, u: dict, m: dict, candles: list, reg
         return False
     if lvl == "high":
         tighten_plan(plan, 0.10)
+    off = offpeak_pct(candles, m["price"])
+    late = off >= ALPHA_OFFPEAK_PCT
+    xl = "med" if (late and lvl == "low") else lvl
+    late_line = (f"⚠️ <b>السعر {off:.0f}% تحت قمة آخر 45 دقيقة</b> — ليس زخماً صاعداً بل ارتداد من هبوط: "
+                 "ادخل بحجم صغير أو انتظر تأكيداً.\n") if late else ""
     it = scan_it(chat, m, u["sec_obj"])
     c = Candidate(m, u["sec_obj"], plan, score, b)
-    tp0 = plan.entry * (1.08 if lvl == "high" else 1.10) if lvl != "low" else None
-    await notify(app, it, scan_header("🚀 زخم", regime) + rtxt + "\n" + quick_exit_line(lvl, plan.entry) + "\n" + format_best(c, []))
+    tp0 = plan.entry * (1.08 if xl == "high" else 1.10) if xl != "low" else None
+    await notify(app, it, scan_header("🚀 زخم", regime) + rtxt + "\n" + late_line + quick_exit_line(xl, plan.entry) + "\n" + format_best(c, []))
     if lvl == "high":
         sc.setdefault("hr", []).append(time.time())
     _add_pos(sc, m, "AUTOM", plan.entry, plan.sl, plan.tp1, plan.tp2, tp0)
@@ -2859,6 +2966,11 @@ async def scan_send_alpha(app, sc: dict, u: dict, m: dict, candles: list, regime
         return False
     if lvl == "high":
         tighten_plan(plan, 0.10)
+    off = offpeak_pct(candles, m["price"])
+    late = off >= ALPHA_OFFPEAK_PCT
+    xl = "med" if (late and lvl == "low") else lvl
+    late_line = (f"⚠️ <b>السعر {off:.0f}% تحت قمة آخر 45 دقيقة</b> — ليس زخماً صاعداً بل ارتداد من هبوط: "
+                 "ادخل بحجم صغير أو انتظر تأكيداً.\n") if late else ""
     it = scan_it(chat, m, u["sec_obj"])
     c = Candidate(m, u["sec_obj"], plan, score, b)
     age = m.get("age_min") or 0
@@ -2867,8 +2979,8 @@ async def scan_send_alpha(app, sc: dict, u: dict, m: dict, candles: list, regime
         f"⏱ عمر الزوج {age:.0f} دقيقة • MC {fmt_usd(m['mcap'])} • سيولة {fmt_usd(m['liq'])} • "
         f"5د {m['chg5']:+.0f}% • 1س {m['chg1']:+.0f}% • شراء {m['buy_ratio5'] * 100:.0f}%"
         + (f" • {holders:.0f} مالك" if holders is not None else "") + "\n"
-        f"🛡️ {html.escape(u.get('sec_txt') or '')}\n" + rtxt + "\n" + quick_exit_line(lvl, plan.entry) + "\n")
-    tp0 = plan.entry * (1.08 if lvl == "high" else 1.10) if lvl != "low" else None
+        f"🛡️ {html.escape(u.get('sec_txt') or '')}\n" + rtxt + "\n" + late_line + quick_exit_line(xl, plan.entry) + "\n")
+    tp0 = plan.entry * (1.08 if xl == "high" else 1.10) if xl != "low" else None
     await notify(app, it, head + format_best(c, []))
     if lvl == "high":
         sc.setdefault("hr", []).append(time.time())
@@ -2988,6 +3100,31 @@ async def scan_off_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     sc = context.application.bot_data.setdefault("scan", {"on": SCAN_DEFAULT_ON, "chat": 0})
     await safe_send(update.effective_message, scan_status_text(sc))
+
+
+async def missed_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """الفرص التي ركضت بعد أن رآها المسح ولم يرسلها، مع سبب عدم الإرسال (لضبط الفلاتر بالأدلة)."""
+    sc = context.application.bot_data.get("scan") or {}
+    sh = sc.get("shadow") or {}
+    cool, posd = sc.get("cool") or {}, sc.get("pos") or {}
+    now = time.time()
+    rows = [((e["pmax"] / e["p0"] - 1) * 100, mt, e) for mt, e in sh.items()
+            if mt not in cool and mt not in posd and e["p0"] > 0]
+    if not rows:
+        await update.effective_message.reply_text("🔎 لا توجد بيانات بعد — يجمعها المسح تلقائياً مع كل دورة. جرّب بعد ساعة.")
+        return
+    ran = sorted((r for r in rows if r[0] >= SHADOW_MIN_GAIN), key=lambda r: -r[0])
+    allst = Counter(r[2]["stage"] for r in rows)
+    ranst = Counter(r[2]["stage"] for r in ran)
+    lines = [f"🔎 <b>الفرص التي لم تُرسَل</b> (آخر {SHADOW_TTL_H:.0f} ساعات)",
+             f"• عملات نشطة لم تُرسَل: {len(rows)} • ركضت ≥+{SHADOW_MIN_GAIN:.0f}% بعد رؤيتها: <b>{len(ran)}</b>"]
+    if ran:
+        lines.append("• أسباب الفوات (ركضت/الكل): " + "، ".join(f"{k} {v}/{allst[k]}" for k, v in ranst.most_common()))
+    for g, mt, e in ran[:10]:
+        lines += ["", f"• <b>{html.escape(e['sym'])}</b> +{g:.0f}% (MC {fmt_usd(e['mc0'])} ← {fmt_usd(e['mc0'] * e['pmax'] / e['p0'])})"
+                      f" • قبل {int((now - e['t0']) / 60)}د • عمر {(e.get('age0') or 0):.0f}د",
+                  f"   السبب: {html.escape(e['why'])}", f"   <code>{mt}</code>"]
+    await update.effective_message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 
 async def scan_now_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4230,6 +4367,15 @@ async def keepalive_loop(client: httpx.AsyncClient) -> None:
             log.warning("Keep-alive failed: %s", e)
 
 
+def _polling_error(exc: Exception) -> None:
+    """يسجّل خطأ الـ polling في سطر واحد واضح بدل Traceback طويل (المكتبة تعيد المحاولة وحدها)."""
+    name = type(exc).__name__
+    if name == "Conflict":
+        log.warning("Polling Conflict: نسخة أخرى تستعمل نفس التوكن (أو نشر قديم لم يُغلق بعد) — %s", str(exc)[:160])
+    else:
+        log.warning("Polling error (%s): %s", name, str(exc)[:200])
+
+
 async def run_all() -> None:
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).concurrent_updates(True).build()
     app.add_handler(CommandHandler("start", start_cmd))
@@ -4245,6 +4391,7 @@ async def run_all() -> None:
     app.add_handler(CommandHandler("scan_off", scan_off_cmd))
     app.add_handler(CommandHandler("scan", scan_cmd))
     app.add_handler(CommandHandler("scan_now", scan_now_cmd))
+    app.add_handler(CommandHandler("missed", missed_cmd))
     app.add_handler(MessageHandler(filters.ALL, register_chat), group=-1)
     app.add_handler(MessageHandler(
         filters.ChatType.PRIVATE & ~filters.COMMAND & (filters.TEXT | filters.CAPTION), on_user_message
@@ -4255,7 +4402,8 @@ async def run_all() -> None:
     await app.initialize()
     await post_init(app)
     await app.start()
-    await app.updater.start_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    await app.updater.start_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True,
+                                    error_callback=_polling_error)
     keepalive = asyncio.create_task(keepalive_loop(app.bot_data["http"]))
     watcher = asyncio.create_task(watch_loop(app))
     scanner = asyncio.create_task(scan_loop(app))
