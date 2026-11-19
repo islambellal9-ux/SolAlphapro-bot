@@ -218,7 +218,7 @@ def _note_api(url: str, status: str) -> None:
 
 
 def api_status_text() -> str:
-    names = {"api.dexscreener.com": "DexScreener", "api.geckoterminal.com": "GeckoTerminal", "api.rugcheck.xyz": "RugCheck"}
+    names = {"api.dexscreener.com": "DexScreener", "api.geckoterminal.com": "GeckoTerminal", "api.rugcheck.xyz": "RugCheck", "api.jup.ag": "Jupiter"}
     lines = []
     for host, name in names.items():
         st = API_STATUS.get(host)
@@ -248,6 +248,29 @@ async def _gecko_wait() -> bool:
         if gap < GECKO_MIN_GAP:
             await asyncio.sleep(GECKO_MIN_GAP - gap)
         _GECKO["last"] = time.time()
+    return True
+
+
+JUP = "https://api.jup.ag/tokens/v2"
+JUP_KEY = (os.getenv("JUP_API_KEY") or "").strip()          # مفتاح مجاني من developers.jup.ag/portal — الحد على المفتاح لا على IP السيرفر
+JUP_MIN_GAP = _env_float("JUP_MIN_GAP", 1.2)
+_JUP: dict = {"lock": None, "last": 0.0, "until": 0.0, "pen": 0}
+_JUP_CACHE: dict = {}                                        # mint -> (وقت، pair بصيغة DexScreener)
+
+
+async def _jup_wait() -> bool:
+    if not JUP_KEY or _JUP["until"] - time.time() > 8:
+        return False
+    if _JUP["lock"] is None:
+        _JUP["lock"] = asyncio.Lock()
+    async with _JUP["lock"]:
+        rem = _JUP["until"] - time.time()
+        if rem > 0:
+            await asyncio.sleep(rem)
+        gap = time.time() - _JUP["last"]
+        if gap < JUP_MIN_GAP:
+            await asyncio.sleep(JUP_MIN_GAP - gap)
+        _JUP["last"] = time.time()
     return True
 
 
@@ -285,6 +308,7 @@ async def fetch_json(
     import random
     is_dex = "api.dexscreener.com" in url
     is_gecko = "geckoterminal" in url
+    is_jup = "api.jup.ag" in url
     for attempt in range(retries + 1):
         try:
             if is_gecko:
@@ -292,6 +316,11 @@ async def fetch_json(
                     _note_api(url, "HTTP 429 (تبريد)")
                     return None
                 headers = {**(headers or {}), "Accept": "application/json;version=20230302"}
+            elif is_jup:
+                if not await _jup_wait():
+                    _note_api(url, "HTTP 429 (تبريد)" if JUP_KEY else "لا يوجد JUP_API_KEY")
+                    return None
+                headers = {**(headers or {}), "x-api-key": JUP_KEY}
             elif is_dex:
                 if not await _dex_wait():
                     _note_api(url, "HTTP 429 (تبريد)")
@@ -307,12 +336,15 @@ async def fetch_json(
                     if is_dex:
                         _DEX["pen"] = min(_DEX["pen"] + 1, 4)
                         _DEX["until"] = time.time() + min(180.0, max(wait, 15.0 * (2 ** (_DEX["pen"] - 1))))
+                    elif is_jup:
+                        _JUP["pen"] = min(_JUP["pen"] + 1, 4)
+                        _JUP["until"] = time.time() + min(120.0, max(wait, 15.0 * (2 ** (_JUP["pen"] - 1))))
                     elif is_gecko:
                         _GECKO["pen"] = min(_GECKO["pen"] + 1, 4)
                         _GECKO["until"] = time.time() + min(300.0, max(wait, 30.0 * (2 ** (_GECKO["pen"] - 1))))
                 if attempt >= retries:
                     return None
-                if (is_dex or is_gecko) and r.status_code == 429:
+                if (is_dex or is_gecko or is_jup) and r.status_code == 429:
                     continue            # أول الحلقة: ينتظر التبريد أو يتخطى
                 await asyncio.sleep(min(30.0, max(1.5 * (2 ** attempt), wait)) + random.uniform(0, 0.5))
                 continue
@@ -323,6 +355,8 @@ async def fetch_json(
                 _DEX["pen"] = 0
             elif is_gecko:
                 _GECKO["pen"] = 0
+            elif is_jup:
+                _JUP["pen"] = 0
             return r.json()
         except ValueError:
             _note_api(url, "JSON غير صالح")
@@ -683,6 +717,83 @@ async def fetch_gecko_pairs(client: httpx.AsyncClient, mints: list) -> list:
     return out
 
 
+def _iso_ms(v) -> float:
+    try:
+        from datetime import datetime
+        return datetime.fromisoformat(str(v).replace("Z", "+00:00")).timestamp() * 1000
+    except Exception:
+        return 0.0
+
+
+def jup_to_pair(t: dict) -> Optional[dict]:
+    """يحوّل عملة من Jupiter Tokens API v2 إلى صيغة pair لـ DexScreener فيعمل باقي البوت بلا أي تعديل."""
+    if not isinstance(t, dict) or not t.get("id"):
+        return None
+    fp = t.get("firstPool") or {}
+    pool = t.get("graduatedPool") or fp.get("id")
+    price = to_float(t.get("usdPrice"))
+    if not pool or price <= 0:
+        return None
+    s5, s1, s6, s24 = (t.get(k) or {} for k in ("stats5m", "stats1h", "stats6h", "stats24h"))
+
+    def vol(x):
+        return to_float(x.get("buyVolume")) + to_float(x.get("sellVolume"))
+    lp = str(t.get("launchpad") or "").lower()
+    dex = "pumpfun" if ("pump" in lp and not t.get("graduatedPool")) else "jupiter"
+    created = _iso_ms(fp.get("createdAt")) or _iso_ms(t.get("createdAt"))
+    return {
+        "chainId": "solana", "dexId": dex, "pairAddress": pool, "url": f"https://dexscreener.com/solana/{pool}",
+        "baseToken": {"address": t["id"], "name": t.get("name") or "Unknown", "symbol": t.get("symbol") or "?"},
+        "priceUsd": str(price), "liquidity": {"usd": to_float(t.get("liquidity"))},
+        "marketCap": to_float(t.get("mcap")), "fdv": to_float(t.get("fdv")), "pairCreatedAt": created,
+        "volume": {"m5": vol(s5), "h1": vol(s1), "h6": vol(s6), "h24": vol(s24)},
+        "priceChange": {"m5": to_float(s5.get("priceChange")), "h1": to_float(s1.get("priceChange")),
+                        "h6": to_float(s6.get("priceChange")), "h24": to_float(s24.get("priceChange"))},
+        "txns": {"m5": {"buys": to_float(s5.get("numBuys")), "sells": to_float(s5.get("numSells"))},
+                 "h1": {"buys": to_float(s1.get("numBuys")), "sells": to_float(s1.get("numSells"))}},
+        "_src": "jupiter",
+    }
+
+
+def _jup_store(tokens) -> list:
+    """يحفظ في الكاش ويرجع قائمة pairs."""
+    out = []
+    now = time.time()
+    for t in tokens if isinstance(tokens, list) else []:
+        pr = jup_to_pair(t)
+        if pr:
+            _JUP_CACHE[pr["baseToken"]["address"]] = (now, pr)
+            out.append(pr)
+    if len(_JUP_CACHE) > 1500:
+        for k in sorted(_JUP_CACHE, key=lambda k: _JUP_CACHE[k][0])[:500]:
+            _JUP_CACHE.pop(k, None)
+    return out
+
+
+async def jup_fill(client: httpx.AsyncClient, best: dict, wanted: list, cap: int = 300) -> int:
+    """يكمّل best بالعملات الناقصة: من كاش Jupiter (<3د) ثم بطلب /search (حتى 100 عملة للطلب). يرجع عدد المُضافة."""
+    if not JUP_KEY:
+        return 0
+    need = [a for a in dict.fromkeys(wanted) if a not in best][:cap]
+    added, now, rest = 0, time.time(), []
+    for a in need:
+        hit = _JUP_CACHE.get(a)
+        if hit and now - hit[0] < 180:
+            _merge_pairs(best, [[hit[1]]])
+            added += 1
+        else:
+            rest.append(a)
+    for i in range(0, len(rest), 100):
+        data = await fetch_json(client, f"{JUP}/search", params={"query": ",".join(rest[i:i + 100])})
+        prs = _jup_store(data)
+        if prs:
+            _merge_pairs(best, [prs])
+            added += len(prs)
+        elif data is None:
+            break
+    return added
+
+
 async def fetch_pairs(client: httpx.AsyncClient, addresses: list, pair_hints: Any = (), sink: Optional[dict] = None,
                       light: bool = False) -> list:
     """sink: قاموس يُملأ تدريجياً فتبقى النتائج الجزئية حتى لو انتهت المهلة."""
@@ -699,6 +810,14 @@ async def fetch_pairs(client: httpx.AsyncClient, addresses: list, pair_hints: An
     if light:                                   # للمراقبة الدورية: بلا طلبات احتياطية إضافية...
         # ...إلا إذا فشلت دفعات DexScreener (429/خطأ): نكمّل من GeckoTerminal ما فشل فقط (سقف صغير)
         failed = [a for c, r in zip(chunks, responses) if r is None for a in c if a not in best]
+        if failed and JUP_KEY:
+            try:
+                await jup_fill(client, best, failed)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("jupiter fill failed")
+            failed = [a for a in failed if a not in best]
         if failed and not gecko_open():
             try:
                 _merge_pairs(best, [await fetch_gecko_pairs(client, failed[:int(_env_float("LIGHT_GECKO_MAX", 30))])])
@@ -708,6 +827,13 @@ async def fetch_pairs(client: httpx.AsyncClient, addresses: list, pair_hints: An
                 log.exception("light gecko fallback failed")
         return list(best.values())
 
+    if JUP_KEY and any(r is None for r in responses):      # Jupiter بمفتاحك: بديل لا يتأثر بـ IP السيرفر
+        try:
+            await jup_fill(client, best, mints)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("jupiter fill failed")
     # 2) DexScreener (endpoint القديم) لما لم يُحَل
     missing = [a for a in mints if a not in best]
     if missing:
@@ -735,24 +861,40 @@ async def fetch_pairs(client: httpx.AsyncClient, addresses: list, pair_hints: An
 
 
 async def probe_apis(client: httpx.AsyncClient) -> list:
-    """اختبار مباشر لاتصال السيرفر بكل مصدر (يظهر في /diag)."""
+    """اختبار مباشر لاتصال السيرفر بكل مصدر + عنوان IP الخروج (يظهر في /diag)."""
     sol = "So11111111111111111111111111111111111111112"
     usdc = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
     tests = {
-        "DexScreener": f"{DEX}/tokens/v1/solana/{sol}",
-        "GeckoTerminal": f"{GECKO}/networks/solana/tokens/{sol}",
-        "RugCheck": f"{RUGCHECK}/tokens/{usdc}/report",
+        "DexScreener": (f"{DEX}/tokens/v1/solana/{sol}", None),
+        "GeckoTerminal": (f"{GECKO}/networks/solana/tokens/{sol}", None),
+        "RugCheck": (f"{RUGCHECK}/tokens/{usdc}/report", None),
     }
+    if JUP_KEY:
+        tests["Jupiter"] = (f"{JUP}/search?query={sol}", {"x-api-key": JUP_KEY})
 
-    async def one(name: str, url: str):
+    async def one(name: str, url: str, hdr):
         t0 = time.time()
         try:
-            r = await client.get(url, timeout=10)
-            return name, f"{'✅' if r.status_code == 200 else '❌'} HTTP {r.status_code} ({time.time() - t0:.1f}s)"
+            r = await client.get(url, timeout=10, headers=hdr)
+            extra = ""
+            if r.status_code != 200:
+                ra = r.headers.get("retry-after")
+                extra = f" • {r.headers.get('server', '')}" + (f" • Retry-After {ra}ث" if ra else "")
+            return name, f"{'✅' if r.status_code == 200 else '❌'} HTTP {r.status_code} ({time.time() - t0:.1f}s){extra}"
         except Exception as e:
             return name, f"❌ {type(e).__name__}"
 
-    return list(await asyncio.gather(*(one(n, u) for n, u in tests.items())))
+    async def my_ip():
+        try:
+            r = await client.get("https://api.ipify.org", timeout=8)
+            return "IP الخروج", r.text.strip()[:45]
+        except Exception as e:
+            return "IP الخروج", f"تعذر ({type(e).__name__})"
+
+    out = list(await asyncio.gather(*(one(n, u, h) for n, (u, h) in tests.items()), my_ip()))
+    if not JUP_KEY:
+        out.append(("Jupiter", "غير مفعّل — أضف JUP_API_KEY في Render لبديل لا يتأثر بحظر IP"))
+    return out
 
 
 # ───────────────────────────── المقاييس والفلترة الأولية ─────────────────────────────
@@ -2369,20 +2511,36 @@ async def discover_candidates(client: httpx.AsyncClient, partial: Optional[dict]
                 _keep(name, None)
         return res
 
+    async def jup_all():
+        res = []
+        srcs = [("jup_recent", f"{JUP}/recent", None), ("jup_trend_5m", f"{JUP}/toptrending/5m", {"limit": 50}),
+                (("jup_organic_5m", f"{JUP}/toporganicscore/5m", {"limit": 50}) if _DISC["n"] % 2
+                 else ("jup_traded_5m", f"{JUP}/toptraded/5m", {"limit": 50}))]
+        for name, url, params in srcs:
+            try:
+                data = await asyncio.wait_for(fetch_json(client, url, params=params), timeout=25)
+                prs = _jup_store(data)
+                mm = [x["baseToken"]["address"] for x in prs] if isinstance(data, list) else None
+            except Exception:
+                mm = None
+            res.append((name, mm))
+            _keep(name, mm)
+        return res
+
     _DISC["n"] += 1
     tasks = []
     if _DISC["n"] % 2 == 1:        # مصادر الملفات/التعزيزات (حد 60/د) كل دورة ثانية فقط
         tasks = [dex("dex_profiles", f"{DEX}/token-profiles/latest/v1"),
                  dex("dex_boosts", f"{DEX}/token-boosts/latest/v1"),
                  dex("dex_boosts_top", f"{DEX}/token-boosts/top/v1")]
-    results = await asyncio.gather(*tasks, gecko_all(), return_exceptions=True)
+    results = await asyncio.gather(*tasks, gecko_all(), *([jup_all()] if JUP_KEY else []), return_exceptions=True)
     ordered = []
     for r in results:
         if isinstance(r, Exception):
             continue
         ordered += r if isinstance(r, list) else [r]
     # الأحدث أولاً: صفحات الأزواج الجديدة ثم Trending ثم DexScreener
-    ordered.sort(key=lambda t: (0 if t[0].startswith("gecko_new") else 1 if t[0].startswith("gecko_trend") else 2))
+    ordered.sort(key=lambda t: (0 if t[0].startswith(("gecko_new", "jup_recent")) else 1 if t[0].startswith(("gecko_trend", "jup_")) else 2))
     for name, mints in ordered:
         stats[name] = len(mints) if mints is not None else -1
         for a in mints or []:
@@ -2875,9 +3033,10 @@ async def scan_cycle(app: Application) -> dict:
     # 6) تحليل واستراتيجية حسب نوع السوق
     t3 = time.time()
     for _, mint in picks[:SCAN_CANDLES_PER_CYCLE]:
-        if gecko_open():
+        _gk = gecko_open()
+        if _gk and lanes.get(mint) != "alpha":      # الارتداد يحتاج شموعاً؛ الناشئة (alpha) تكمل بلا شموع (كما كانت تفعل عند فشلها)
             st["skipped"]["GeckoTerminal في تبريد"] = st["skipped"].get("GeckoTerminal في تبريد", 0) + 1
-            break
+            continue
         if time.time() - t0 > SCAN_CYCLE_TIMEOUT - 25:
             st["skipped"]["نفاد وقت الدورة"] = st["skipped"].get("نفاد وقت الدورة", 0) + 1
             break
@@ -2888,7 +3047,7 @@ async def scan_cycle(app: Application) -> dict:
             continue
         u["candle_ts"] = time.time()
         try:
-            candles = await asyncio.wait_for(fetch_candles(client, m["pair"], 1, 1000), timeout=30)
+            candles = [] if _gk else await asyncio.wait_for(fetch_candles(client, m["pair"], 1, 1000), timeout=30)
         except Exception:
             candles = []
         st["candles"] += 1
