@@ -345,7 +345,7 @@ async def fetch_json(
                 if attempt >= retries:
                     return None
                 if (is_dex or is_gecko or is_jup) and r.status_code == 429:
-                    continue            # أول الحلقة: ينتظر التبريد أو يتخطى
+                    continue
                 await asyncio.sleep(min(30.0, max(1.5 * (2 ** attempt), wait)) + random.uniform(0, 0.5))
                 continue
             if r.status_code != 200:
@@ -375,24 +375,20 @@ async def fetch_json(
 B58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 B58_INDEX = {ch: i for i, ch in enumerate(B58_ALPHABET)}
 
-# عنوان Solana = Base58 بطول 32–44 حرفاً (والتحقق النهائي أنه يفك إلى 32 بايت)
 SOL_ADDR_RE = re.compile(r"(?<![1-9A-HJ-NP-Za-km-z])[1-9A-HJ-NP-Za-km-z]{32,44}(?![1-9A-HJ-NP-Za-km-z])")
-# روابط DexScreener تحمل عنوان "الزوج" لا العملة → نحلّه لاحقاً عبر endpoint الأزواج
 DEX_PAIR_URL_RE = re.compile(r"(?i:dexscreener\.com)/solana/([1-9A-HJ-NP-Za-km-z]{32,44})")
-# روابط المحافظ/الحسابات ليست عقود عملات
 EXPLORER_URL_RE = re.compile(r"(?i:solscan\.io|solana\.fm|explorer\.solana\.com)/(?:account|address)/\S+")
-
 
 
 @dataclass
 class Signal:
-    mint: str                       # عنوان العملة (أو عنوان زوج إذا is_hint)
+    mint: str
     post_id: int
-    ts: Optional[float]             # وقت نشر الرسالة (epoch ثوانٍ)
-    is_hint: bool = False           # جاء من رابط DexScreener (قد يكون عنوان زوج)
-    manual: bool = False            # أرسله المستخدم يدوياً (لصق/Forward)
-    added: float = 0.0              # وقت استلام البوت له (للوضع اليدوي)
-    done: bool = False              # حُلِّل سابقاً (لا يُعاد تحليله إلا بـ /best all)
+    ts: Optional[float]
+    is_hint: bool = False
+    manual: bool = False
+    added: float = 0.0
+    done: bool = False
 
 
 def is_valid_solana_address(s: str) -> bool:
@@ -407,7 +403,6 @@ def is_valid_solana_address(s: str) -> bool:
 
 
 def extract_addresses(text: str):
-    """يرجع (عناوين_عقود، عناوين_من_روابط_DexScreener) مرتبة وفريدة."""
     if not text:
         return [], []
     hints: list = []
@@ -440,14 +435,13 @@ _ANCHOR_RE = re.compile(r'<a\s[^>]*href="([^"]+)"[^>]*>(.*?)</a>', re.S)
 
 
 def _html_to_text(fragment: str) -> str:
-    s = _ANCHOR_RE.sub(lambda m: f" {m.group(1)} {m.group(2)} ", fragment)  # نُبقي قيمة href
+    s = _ANCHOR_RE.sub(lambda m: f" {m.group(1)} {m.group(2)} ", fragment)
     s = re.sub(r"<br\s*/?>", "\n", s)
     s = re.sub(r"<[^>]+>", " ", s)
     return html.unescape(s)
 
 
 def parse_channel_html(page: str) -> list:
-    """يحلل صفحة معاينة القناة (…/s/<channel>) → [{id, ts, text}]."""
     matches = list(_POST_RE.finditer(page))
     out = []
     for i, mt in enumerate(matches):
@@ -469,11 +463,10 @@ def parse_channel_html(page: str) -> list:
     return out
 
 
-TL: dict = {"client": None, "error": None}   # حالة عميل Telethon (يُهيّأ في post_init)
+TL: dict = {"client": None, "error": None}
 
 
 async def create_telethon():
-    """يرجع (client, خطأ). يحتاج جلسة مستخدم؛ حسابات البوت ممنوعة من قراءة سجل القنوات."""
     if not TG_SESSION:
         return None, "TELETHON_SESSION غير مضبوطة (جلسة البوت لا تقرأ سجل القنوات)"
     if not (TG_API_ID and TG_API_HASH):
@@ -508,7 +501,6 @@ async def create_telethon():
 
 
 async def _read_channel(tl, limit: int, cutoff: float, info: dict) -> list:
-    """أحدث الرسائل أولاً → [{id, ts, text}] مع نص الرسالة وروابطها (hidden links/أزرار/معاينة)."""
     out: list = []
     async for msg in tl.iter_messages(SIGNAL_CHANNEL, limit=limit):
         ts = msg.date.timestamp() if getattr(msg, "date", None) else None
@@ -517,22 +509,22 @@ async def _read_channel(tl, limit: int, cutoff: float, info: dict) -> list:
             info["newest_ts"] = max(info.get("newest_ts", 0.0), ts)
         if ts and ts < cutoff:
             info["expired"] += 1
-            break  # الرسائل مرتبة من الأحدث → ما بعدها أقدم
+            break
         parts = [msg.raw_text or ""]
         try:
             for ent, _txt in msg.get_entities_text():
                 if getattr(ent, "url", None):
-                    parts.append(ent.url)           # رابط مخفي خلف نص
+                    parts.append(ent.url)
         except Exception:
             pass
         wp = getattr(getattr(msg, "media", None), "webpage", None)
         if getattr(wp, "url", None):
-            parts.append(wp.url)                    # معاينة الرابط
+            parts.append(wp.url)
         try:
             for row in msg.buttons or []:
                 for b in row:
                     if getattr(b, "url", None):
-                        parts.append(b.url)         # أزرار inline
+                        parts.append(b.url)
         except Exception:
             pass
         out.append({"id": msg.id, "ts": ts, "text": "\n".join(parts)})
@@ -549,7 +541,6 @@ def _describe_tl_error(e: Exception) -> str:
 
 
 async def _read_http(client: httpx.AsyncClient, info: dict, cutoff: float, errors: list):
-    """يجرّب مرايا المعاينة العامة بالترتيب. يرجع (رسائل، نجحت_القراءة)."""
     for tmpl in SIGNAL_HTTP_MIRRORS:
         base = tmpl.format(ch=SIGNAL_CHANNEL)
         host = base.split("/")[2] if "//" in base else base
@@ -596,7 +587,6 @@ async def _read_http(client: httpx.AsyncClient, info: dict, cutoff: float, error
 
 
 async def discover_signals(client: Optional[httpx.AsyncClient] = None):
-    """يقرأ آخر رسائل القناة: Telethon (جلسة مستخدم) ثم HTTP كاحتياط. يرجع (Signal الأحدث أولاً، info)."""
     info = {
         "ok": False, "error": None, "errors": [], "source": None, "messages": 0, "expired": 0,
         "with_addr": 0, "addresses": 0, "newest_age_min": None, "newest_ts": 0.0,
@@ -671,7 +661,6 @@ def _merge_pairs(best: dict, payloads: list) -> None:
 
 
 async def fetch_gecko_pairs(client: httpx.AsyncClient, mints: list) -> list:
-    """احتياط: GeckoTerminal (tokens/multi + top_pools) محوَّل لشكل أزواج DexScreener."""
     out: list = []
     for i in range(0, len(mints), 30):
         chunk = mints[i:i + 30]
@@ -700,7 +689,7 @@ async def fetch_gecko_pairs(client: httpx.AsyncClient, mints: list) -> list:
                 tx = pa.get("transactions") or {}
                 out.append({
                     "chainId": "solana",
-                    "dexId": dex_id.replace("-", ""),          # pump-fun → pumpfun
+                    "dexId": dex_id.replace("-", ""),
                     "pairAddress": pa.get("address"),
                     "baseToken": {"address": mint, "name": ta.get("name"), "symbol": ta.get("symbol")},
                     "priceUsd": ta.get("price_usd"),
@@ -719,14 +708,12 @@ async def fetch_gecko_pairs(client: httpx.AsyncClient, mints: list) -> list:
 
 def _iso_ms(v) -> float:
     try:
-        from datetime import datetime
         return datetime.fromisoformat(str(v).replace("Z", "+00:00")).timestamp() * 1000
     except Exception:
         return 0.0
 
 
 def jup_to_pair(t: dict) -> Optional[dict]:
-    """يحوّل عملة من Jupiter Tokens API v2 إلى صيغة pair لـ DexScreener فيعمل باقي البوت بلا أي تعديل."""
     if not isinstance(t, dict) or not t.get("id"):
         return None
     fp = t.get("firstPool") or {}
@@ -738,6 +725,7 @@ def jup_to_pair(t: dict) -> Optional[dict]:
 
     def vol(x):
         return to_float(x.get("buyVolume")) + to_float(x.get("sellVolume"))
+
     lp = str(t.get("launchpad") or "").lower()
     dex = "pumpfun" if ("pump" in lp and not t.get("graduatedPool")) else "jupiter"
     created = _iso_ms(fp.get("createdAt")) or _iso_ms(t.get("createdAt"))
@@ -756,7 +744,6 @@ def jup_to_pair(t: dict) -> Optional[dict]:
 
 
 def _jup_store(tokens) -> list:
-    """يحفظ في الكاش ويرجع قائمة pairs."""
     out = []
     now = time.time()
     for t in tokens if isinstance(tokens, list) else []:
@@ -771,7 +758,6 @@ def _jup_store(tokens) -> list:
 
 
 async def jup_fill(client: httpx.AsyncClient, best: dict, wanted: list, cap: int = 300) -> int:
-    """يكمّل best بالعملات الناقصة: من كاش Jupiter (<3د) ثم بطلب /search (حتى 100 عملة للطلب). يرجع عدد المُضافة."""
     if not JUP_KEY:
         return 0
     need = [a for a in dict.fromkeys(wanted) if a not in best][:cap]
@@ -796,19 +782,16 @@ async def jup_fill(client: httpx.AsyncClient, best: dict, wanted: list, cap: int
 
 async def fetch_pairs(client: httpx.AsyncClient, addresses: list, pair_hints: Any = (), sink: Optional[dict] = None,
                       light: bool = False) -> list:
-    """sink: قاموس يُملأ تدريجياً فتبقى النتائج الجزئية حتى لو انتهت المهلة."""
     best: dict = sink if sink is not None else {}
     hint_set = set(pair_hints)
     mints = [a for a in addresses if a not in hint_set]
 
-    # 1) DexScreener (الجديد)
     chunks = [addresses[i:i + 30] for i in range(0, len(addresses), 30)]
     responses = await asyncio.gather(
         *(fetch_json(client, f"{DEX}/tokens/v1/solana/{','.join(c)}") for c in chunks)
     )
     _merge_pairs(best, list(responses))
-    if light:                                   # للمراقبة الدورية: بلا طلبات احتياطية إضافية...
-        # ...إلا إذا فشلت دفعات DexScreener (429/خطأ): نكمّل من GeckoTerminal ما فشل فقط (سقف صغير)
+    if light:
         failed = [a for c, r in zip(chunks, responses) if r is None for a in c if a not in best]
         if failed and JUP_KEY:
             try:
@@ -827,14 +810,13 @@ async def fetch_pairs(client: httpx.AsyncClient, addresses: list, pair_hints: An
                 log.exception("light gecko fallback failed")
         return list(best.values())
 
-    if JUP_KEY and any(r is None for r in responses):      # Jupiter بمفتاحك: بديل لا يتأثر بـ IP السيرفر
+    if JUP_KEY and any(r is None for r in responses):
         try:
             await jup_fill(client, best, mints)
         except asyncio.CancelledError:
             raise
         except Exception:
             log.exception("jupiter fill failed")
-    # 2) DexScreener (endpoint القديم) لما لم يُحَل
     missing = [a for a in mints if a not in best]
     if missing:
         mchunks = [missing[i:i + 30] for i in range(0, len(missing), 30)]
@@ -843,12 +825,10 @@ async def fetch_pairs(client: httpx.AsyncClient, addresses: list, pair_hints: An
         )
         _merge_pairs(best, list(resp2))
 
-    # 3) GeckoTerminal احتياطاً لما لم يُحَل
     missing = [a for a in mints if a not in best]
     if missing:
         _merge_pairs(best, [await fetch_gecko_pairs(client, missing)])
 
-    # عناوين جاءت من روابط DexScreener ولم تُحَل كعملات → نجرّبها كعناوين أزواج
     known_pairs = {p.get("pairAddress") for p in best.values()}
     hints = [h for h in dict.fromkeys(hint_set) if h not in best and h not in known_pairs]
     if hints:
@@ -861,7 +841,6 @@ async def fetch_pairs(client: httpx.AsyncClient, addresses: list, pair_hints: An
 
 
 async def probe_apis(client: httpx.AsyncClient) -> list:
-    """اختبار مباشر لاتصال السيرفر بكل مصدر + عنوان IP الخروج (يظهر في /diag)."""
     sol = "So11111111111111111111111111111111111111112"
     usdc = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
     tests = {
@@ -964,7 +943,6 @@ def pre_filter(m: dict) -> Optional[str]:
 
 
 def reason_detail(m: dict, reason: str) -> str:
-    """يحوّل سبب الفلتر الأولي إلى جملة بالأرقام الفعلية والحد المطلوب."""
     try:
         if reason == "سيولة منخفضة":
             return f"سيولة {fmt_usd(m['liq'])} (الحد الأدنى {fmt_usd(MIN_LIQUIDITY_USD)})"
@@ -1013,8 +991,8 @@ def prelim_rank(m: dict) -> float:
 @dataclass
 class Security:
     passed: bool
-    reasons: list = field(default_factory=list)      # حظر صلب
-    warnings: list = field(default_factory=list)     # مخاطرة أعلى (المستوى B)
+    reasons: list = field(default_factory=list)
+    warnings: list = field(default_factory=list)
     top10: float = 0.0
     dev: Optional[float] = None
     lp_locked: Optional[float] = None
@@ -1024,8 +1002,6 @@ class Security:
 
 
 _RUG_CACHE: dict = {}
-
-
 _RUG_STATE: dict = {"sem": None, "last": 0.0, "neg": {}}
 
 
@@ -1034,7 +1010,7 @@ async def get_rugcheck_report(client: httpx.AsyncClient, mint: str) -> Optional[
     if cached and time.time() - cached[0] < RUGCHECK_CACHE_SEC:
         return cached[1]
     neg = _RUG_STATE["neg"].get(mint)
-    if neg and time.time() - neg < 60:          # فشل حديث: لا نضغط على RugCheck
+    if neg and time.time() - neg < 60:
         return None
     if _RUG_STATE["sem"] is None:
         _RUG_STATE["sem"] = asyncio.Semaphore(2)
@@ -1184,7 +1160,7 @@ class ScalpPlan:
     swing_high: float
     zone_low: float
     zone_high: float
-    status: str            # IN_ZONE | ABOVE_ZONE | WAIT | MOMENTUM | HOLD
+    status: str
     above_pct: float
     entry: float
     tp1: float
@@ -1200,12 +1176,10 @@ class ScalpPlan:
 
 
 def candle_tf(age_min: Optional[float]) -> int:
-    """العملة الحديثة (<3 ساعات) لا تملك 20 شمعة 5د، فنستعمل شموع الدقيقة (كما يتداولها المستخدم عادة)."""
     return 1 if (age_min is not None and age_min < 180) else 5
 
 
 def fib_params(tf: int):
-    """(أقل عدد شموع، نافذة التحليل، نظرة الـ Swing) حسب الإطار الزمني."""
     return (25, 120, 60) if tf == 1 else (MIN_CANDLES, MAX_WINDOW_CANDLES, SWING_LOOKBACK_CANDLES)
 
 
@@ -1243,7 +1217,6 @@ async def _fetch_candles_raw(client: httpx.AsyncClient, pool: str, tf: int = 5, 
 
 
 def compute_scalp_plan(candles: list, price: float, tf: int = 5):
-    """SCALP: يرجع (ScalpPlan, None) أو (None, سبب_الرفض). WAIT = السعر بعيد فوق المنطقة."""
     min_c, max_w, lookback = fib_params(tf)
     if len(candles) < min_c:
         return None, "شموع غير كافية لحساب Fibonacci"
@@ -1306,9 +1279,8 @@ def compute_scalp_plan(candles: list, price: float, tf: int = 5):
 def momentum_ok(m: dict) -> bool:
     if not (3 <= m["chg1"] <= MOMENTUM_MAX_H1_PCT) or m["chg5"] < -1 or m["buy_ratio5"] < 0.45:
         return False
-    if m["vol_pace"] >= 0.8:                 # فوليوم متسارع
+    if m["vol_pace"] >= 0.8:
         return True
-    # اندفاع سعري حديث بسيطرة واضحة للمشترين حتى لو تباطأ فوليوم آخر 5 دقائق عن متوسط الساعة
     return m["chg5"] >= 5 and m["buy_ratio5"] >= 0.55 and m["vol5"] > 0
 
 
@@ -1333,7 +1305,7 @@ def compute_alt_plan(kind: str, m: dict, candles: list) -> ScalpPlan:
         if candles:
             recent_low = min(c[3] for c in candles[-8:])
             sl = clamp(recent_low * 0.985, price * 0.85, price * 0.93)
-    else:  # HOLD
+    else:
         zone_low, zone_high = price * 0.92, price
         tp1, tp2 = price * 1.50, price * 2.00
         sl = price * 0.75
@@ -1360,7 +1332,6 @@ def compute_alt_plan(kind: str, m: dict, candles: list) -> ScalpPlan:
 
 
 def market_flags(m: dict) -> list:
-    """عملة صغيرة/حديثة: تُقبل لكن بتحذير (فرصتها أكبر ومخاطرتها أعلى)."""
     f = []
     if m["liq"] < FLAG_LIQ_USD:
         f.append(f"سيولة منخفضة {fmt_usd(m['liq'])} — خطر انزلاق")
@@ -1374,7 +1345,6 @@ def market_flags(m: dict) -> list:
 
 
 def compute_score(m: dict, sec: Security, plan: ScalpPlan):
-    """Score /100 = سيولة/MC (20) + فوليوم (20) + زخم (10) + جودة الدخول (25) + أمان (25) − عقوبة مخاطرة."""
     b: dict = {}
     b["liq_mcap"] = 20 * clamp(m["liq_mcap"] / 0.10, 0, 1)
 
@@ -1430,15 +1400,15 @@ class Candidate:
 
 @dataclass
 class ScanResult:
-    ranked: list = field(default_factory=list)       # كل الصفقات مرتبة بالـ Score
+    ranked: list = field(default_factory=list)
     stats: Counter = field(default_factory=Counter)
     sources: dict = field(default_factory=dict)
     signals: int = 0
     discovered: int = 0
-    verdicts: dict = field(default_factory=dict)   # mint -> {sym, mcap, icon, text}
-    watch: list = field(default_factory=list)      # (m, sec|None, kind) → قائمة المراقبة
-    secs: dict = field(default_factory=dict)       # mint -> Security (لتسجيل الصفقات)
-    unresolved: list = field(default_factory=list)  # عقود بلا بيانات سوق
+    verdicts: dict = field(default_factory=dict)
+    watch: list = field(default_factory=list)
+    secs: dict = field(default_factory=dict)
+    unresolved: list = field(default_factory=list)
     after_prefilter: int = 0
     after_security: int = 0
     finished_at: float = 0.0
@@ -1477,10 +1447,9 @@ async def run_scan(
                                       "buy_ratio5", "vol1", "pair", "dex", "symbol")}
         res.verdicts[m["mint"]] = {"sym": m["symbol"], "mcap": m["mcap"], "icon": icon, "text": text, "m": snap}
 
-    # 1) قراءة القناة
     await say(f"📡 (1/4) قراءة آخر إشارات قناة @{SIGNAL_CHANNEL} ...")
     signals, res.sources = await discover_signals(client)
-    if extra:  # عقود أرسلها المستخدم يدوياً (تُدمج مع عقود القناة، وعقد القناة له الأولوية)
+    if extra:
         have = {s.mint for s in signals}
         signals = [e for e in extra if e.mint not in have] + signals
         signals = signals[:MAX_DISCOVERED_TOKENS]
@@ -1493,7 +1462,6 @@ async def run_scan(
     addrs = [s.mint for s in signals]
     hints = [s.mint for s in signals if s.is_hint]
 
-    # 2) بيانات الأزواج
     await say(f"📊 (2/4) جلب بيانات {len(addrs)} عقد من القناة...")
     sink: dict = {}
     try:
@@ -1517,11 +1485,11 @@ async def run_scan(
         reason = pre_filter(m)
         if reason:
             kind = watch_kind_for(reason)
-            if kind in ("young", "bonding"):          # الفحص الأمني غير ممكن/مبكر → مراقبة ثم فحص تلقائي
+            if kind in ("young", "bonding"):
                 res.stats[reason] += 1
                 res.watch.append((m, None, kind))
                 set_v(m, "👁", reason_detail(m, reason) + " — أُضيفت للمراقبة وسأعيد فحصها تلقائياً")
-            elif kind in ("dip", "extended"):         # تمر على الفحص الأمني ثم تُراقب (لا دخول فوري)
+            elif kind in ("dip", "extended"):
                 m["watch_kind"], m["watch_reason"] = kind, reason_detail(m, reason)
                 pre.append(m)
             else:
@@ -1538,7 +1506,6 @@ async def run_scan(
         set_v(m, "⏭️", f"لم يُفحص أمنياً (حد الفحص {MAX_SECURITY_CHECKS} عملة) — ليس حكماً على العملة")
     pre = pre[:MAX_SECURITY_CHECKS]
 
-    # 3) الأمان
     await say(f"🛡️ (3/4) فحص أمان {len(pre)} عملة عبر RugCheck...")
     sem = asyncio.Semaphore(4)
 
@@ -1580,7 +1547,6 @@ async def run_scan(
                 secure.append((m, sec))
     res.after_security = len(secure)
 
-    # 4) الخطط
     await say(f"📈 (4/4) تحليل {len(secure)} عملة آمنة وبناء الخطط...")
     secure.sort(key=lambda ms: prelim_rank(ms[0]), reverse=True)
     candle_map: dict = {}
@@ -1606,7 +1572,7 @@ async def run_scan(
 
     ranked: list = []
     for m, sec in secure:
-        res.watch.append((m, sec, "nosetup"))          # كل عملة آمنة تُراقب لارتداد مؤكد
+        res.watch.append((m, sec, "nosetup"))
         candles = candle_map.get(m["mint"], [])
         plans = []
         scalp_reason = None
@@ -1844,7 +1810,7 @@ WELCOME = (
 )
 
 HELP = (
-    "🤖 <b>مسح السوق 24/24</b> يعمل تلقائياً ومستقلاً عن قائمتك: يلتقط العملات الناشئة (دقائق، MC 30–250K) والمُثبّتة بفحص أمني صارم وزخم حقيقي ويرسل الصفقات بحسب نوع السوق. القائمة تُنظَّف تلقائياً من العملات المنهارة/المشبوهة. كل صفقة تحمل «مخاطرة Rug» (نشاط متراجع، مالكون قليلون، صعود قطعي، سيولة رقيقة) مع خروج سريع TP0، وحارس يراقب الصفقات المفتوحة كل ~15 ثانية وينبّه فوراً عند سحب السيولة. /scan الحالة، /scan_now فحص فوري، /scan_off إيقاف، /scan_on لتحويله إلى محادثة/مجموعة أخرى. /missed الفرص التي فاتت وسبب عدم إرسالها.\n\n"
+    "🤖 <b>مسح السوق 24/24</b> يعمل تلقائياً ومستقلاً عن قائمتك: يلتقط العملات الناشئة (دقائق، MC 25–350K) والمُثبّتة بفحص أمني صارم وزخم/رسوم متسارعة ويرسل الصفقات بحسب نوع السوق. القائمة تُنظَّف تلقائياً من العملات المنهارة/المشبوهة. كل صفقة تحمل «مخاطرة Rug» مع خروج سريع TP0، وحارس يراقب الصفقات المفتوحة كل ~15 ثانية وينبّه فوراً عند سحب السيولة. /scan الحالة، /scan_now فحص فوري، /scan_off إيقاف، /scan_on لتحويله إلى محادثة/مجموعة أخرى. /missed الفرص التي فاتت وسبب عدم إرسالها.\n\n"
     "📤 <b>/export</b>: ملف شموع الدقيقة والإشارات لمعايرة كاشف الارتداد على كل عملاتك (أرسله لي).\n\n"
     "📍 <b>الدعم</b>: كل ارتداد مؤكد يُرسل لك كما هو، ويُوسم بقوة الدعم (✅ قوي / ⚠️ ضعيف) مع أقرب دعم تحته، وأنبّهك عند اقتراب السعر من دعم قوي. "
     "العملات لا تُحذف من القائمة تلقائياً إلا بانتهاء المدة (8 ساعات).\n\n"
@@ -1910,7 +1876,6 @@ def _cooldown_wait(bd: dict, user_id: int) -> int:
 
 
 async def safe_edit(status_msg, original_msg, text: str) -> None:
-    """يضمن وصول الرد دائماً: HTML ثم نص عادي ثم رسالة جديدة."""
     try:
         await status_msg.edit_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
         return
@@ -1945,19 +1910,19 @@ WATCH_TTL_HOURS = _env_float("WATCH_TTL_HOURS", 8)
 WATCH_MAX_PER_USER = int(_env_float("WATCH_MAX_PER_USER", 30))
 WATCH_CANDLES_PER_CYCLE = int(_env_float("WATCH_CANDLES_PER_CYCLE", 2))
 WATCH_SEC_PER_CYCLE = int(_env_float("WATCH_SEC_PER_CYCLE", 4))
-BOUNCE_MIN_PCT = _env_float("BOUNCE_MIN_PCT", 3)          # أقل ارتداد من القاع لاعتباره بدأ (كان 4)
-BOUNCE_MAX_PCT = _env_float("BOUNCE_MAX_PCT", 25)         # أكثر منه = فات الدخول المبكر
-BOUNCE_MIN_RR1 = _env_float("BOUNCE_MIN_RR1", 0)          # بوابة عائد/مخاطرة (0 = معطّلة: نُوسم الضعيف ولا نمنعه)
-FAIL_STREAK = int(_env_float("FAIL_STREAK", 2))           # فشلان متتاليان → كتم عملة (0 = معطّل)
+BOUNCE_MIN_PCT = _env_float("BOUNCE_MIN_PCT", 3)
+BOUNCE_MAX_PCT = _env_float("BOUNCE_MAX_PCT", 25)
+BOUNCE_MIN_RR1 = _env_float("BOUNCE_MIN_RR1", 0)
+FAIL_STREAK = int(_env_float("FAIL_STREAK", 2))
 FAIL_MUTE_MIN = _env_float("FAIL_MUTE_MIN", 90)
-SAME_ZONE_CD_MIN = _env_float("SAME_ZONE_CD_MIN", 45)     # بعد الفشل: لا تنبيه من نفس المنطقة
+SAME_ZONE_CD_MIN = _env_float("SAME_ZONE_CD_MIN", 45)
 SUPPORT_ALERT_MIN_MC = _env_float("SUPPORT_ALERT_MIN_MC", 20000)
 SUPPORT_ALERT_COOLDOWN_MIN = _env_float("SUPPORT_ALERT_COOLDOWN_MIN", 180)
-HIST_MAX = 1500                                           # شموع دقيقة محفوظة لكل عملة للتصدير
+HIST_MAX = 1500
 BOUNCE_MIN_RETRACE = _env_float("BOUNCE_MIN_RETRACE", 0.382)
 BOUNCE_SL_BUFFER = 0.02
 WATCH_FILE = os.getenv("WATCH_FILE", "watchlist.json")
-WATCH_DEAD_PCT = _env_float("WATCH_DEAD_PCT", 0)   # 0 = معطّل. >0: انهيار بهذه النسبة يوقف تنبيهات العملة (تبقى في القائمة)
+WATCH_DEAD_PCT = _env_float("WATCH_DEAD_PCT", 0)
 
 WATCH_KIND_TXT = {
     "young": "⏳ حديثة — بانتظار نضج البيانات",
@@ -2056,10 +2021,9 @@ def format_watch_added(added: list) -> str:
 
 
 def detect_bounce(candles: list, m: dict):
-    """يكشف ارتداداً مؤكداً بعد موجة صاعدة وتصحيح. يرجع (setup|None، سبب_عدم_الإشارة)."""
     if len(candles) < 30:
         return None, f"شموع قليلة ({len(candles)})"
-    w = candles[:-1][-120:]                       # شموع مغلقة فقط
+    w = candles[:-1][-120:]
     price = m["price"]
     hi_i = max(range(len(w)), key=lambda i: w[i][2])
     peak = w[hi_i][2]
@@ -2139,11 +2103,11 @@ def format_bounce_alert(it: dict, m: dict, s: dict) -> str:
     )
 
 
-# ───────────────────────────── الدعم القوي (معلومة وتنبيه اقتراب — لا يمنع أي إشارة) ─────────────────────────────
-SUPPORT_MIN_STRENGTH = _env_float("SUPPORT_MIN_STRENGTH", 3)      # قوة تُعدّ "قوية" للوسم والتنبيه
-SUPPORT_TOL_PCT = _env_float("SUPPORT_TOL_PCT", 3)                # تسامح القاع مع حدود الدعم
-SUPPORT_NEAR_PCT = _env_float("SUPPORT_NEAR_PCT", 6)              # تنبيه الاقتراب
-SUPPORT_ALERTS = os.getenv("SUPPORT_ALERTS", "1") != "0"          # 0 = بلا تنبيه اقتراب
+# ───────────────────────────── الدعم القوي ─────────────────────────────
+SUPPORT_MIN_STRENGTH = _env_float("SUPPORT_MIN_STRENGTH", 3)
+SUPPORT_TOL_PCT = _env_float("SUPPORT_TOL_PCT", 3)
+SUPPORT_NEAR_PCT = _env_float("SUPPORT_NEAR_PCT", 6)
+SUPPORT_ALERTS = os.getenv("SUPPORT_ALERTS", "1") != "0"
 REGIME_MIN_RESOLVED = 6
 REGIME_LABEL = {"good": "🟢 جيد", "neutral": "🟡 محايد", "bleeding": "🔴 نازف (الدعم يُكسر)"}
 
@@ -2165,8 +2129,6 @@ def to_5m(c1: list) -> list:
 
 
 def find_supports(candles: list, k: int = 3, min_sep: int = 6, launch: bool = False) -> list:
-    """مناطق دعم أفقية من قيعان محورية مجمّعة بنسبة 3%.
-    القوة = لمسات متباعدة (حتى 4) + فوليوم عند اللمس + أدنى قاع + قاعدة الإطلاق."""
     cs = candles[:-1]
     if len(cs) < 40:
         return []
@@ -2211,7 +2173,6 @@ def find_supports(candles: list, k: int = 3, min_sep: int = 6, launch: bool = Fa
 
 
 def find_supports_1m(c1: list, age_min: Optional[float] = None) -> list:
-    """دعم من نفس شموع الدقيقة المجلوبة للارتداد (بلا أي طلب إضافي): 5د مجمّعة محلياً إن توفر 10 ساعات."""
     launch = age_min is not None and age_min <= 960
     if len(c1) >= 600:
         return find_supports(to_5m(c1), 3, 6, launch)
@@ -2219,7 +2180,6 @@ def find_supports_1m(c1: list, age_min: Optional[float] = None) -> list:
 
 
 def compute_regime(bd: dict) -> dict:
-    """حالة السوق (للعرض فقط): نسبة نجاح آخر ارتدادات محسومة + اتساع الهبوط في قائمة المراقبة."""
     recs = sorted((r for r in (bd.get("track") or {}).values()
                    if r.get("decision") == "bounce" and r.get("first") in ("TP1", "SL")), key=lambda r: r["ts"])[-8:]
     wr = (sum(1 for r in recs if r["first"] == "TP1") / len(recs)) if len(recs) >= REGIME_MIN_RESOLVED else None
@@ -2234,7 +2194,6 @@ def compute_regime(bd: dict) -> dict:
 
 
 def annotate_setup(s: dict, zones: list, regime_state: str) -> None:
-    """يضيف للإشارة معلومات الدعم دون تغيير شروطها أو منعها."""
     s["regime"] = regime_state
     tol = SUPPORT_TOL_PCT / 100
     near = [z for z in zones if z["low"] * (1 - tol) <= s["trough"] <= z["high"] * (1 + tol)]
@@ -2295,7 +2254,6 @@ def next_support_note(it: dict, s: dict) -> str:
 
 
 async def maybe_support_alert(app: Application, it: dict, m: dict, zones: list) -> None:
-    """اقتراب من دعم قوي *مُثبت* (لمسات ارتدت ≥10% ولم يُكسر) في عملة غير منهارة وغير مكتومة."""
     price = m["price"]
     now = time.time()
     if not SUPPORT_ALERTS or price <= 0 or not zones:
@@ -2344,7 +2302,6 @@ def store_hist(bd: dict, it: dict, candles: list) -> None:
 
 
 async def export_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """ملف بيانات كامل (شموع 1د مع الفوليوم + الإشارات + القائمة) لتحليل أعمق ومعايرة الكاشف."""
     msg = update.effective_message
     bd = context.application.bot_data
     uid = update.effective_user.id
@@ -2353,14 +2310,14 @@ async def export_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     track = [r for r in (bd.get("track") or {}).values() if r["uid"] == uid]
     mints |= {r["mint"] for r in track}
     hist = {m_: v for m_, v in (bd.get("hist") or {}).items() if m_ in mints}
-    payload = {"version": "4.4", "ts": time.time(), "regime": bd.get("regime"), "watch": watch,
+    payload = {"version": "5.1", "ts": time.time(), "regime": bd.get("regime"), "watch": watch,
                "tracker": track, "hist": hist}
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     n = sum(len(v["c"]) for v in hist.values())
     try:
         await msg.reply_document(
             document=io.BytesIO(data), filename=f"solalpha_export_{time.strftime('%Y%m%d_%H%M')}.json",
-            caption=f"📤 {len(hist)} عملة • {n} شمعة دقيقة • {len(track)} إشارة. أرسل لي الملف لنحلل كل الارتدادات ونعايرالكاشف.")
+            caption=f"📤 {len(hist)} عملة • {n} شمعة دقيقة • {len(track)} إشارة. أرسل لي الملف لنحلل كل الارتدادات ونعاير الكاشف.")
     except Exception:
         log.exception("export failed")
         await msg.reply_text("❌ تعذر إرسال الملف. راجع Logs.")
@@ -2368,55 +2325,60 @@ async def export_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await msg.reply_text("ℹ️ لا شموع محفوظة بعد: تُجمع مع كل فحص للمراقبة (انتظر بضع دقائق بعد إضافة العملات).")
 
 
-# ───────────────────────────── مسح السوق 24/24 (v5): ناشئة + مُثبّتة، مستقل تماماً عن قائمة المراقبة ─────────────────────────────
+# ───────────────────────────── مسح السوق 24/24 (v5.1 المحسّن) ─────────────────────────────
 SCAN_STATE_FILE = os.getenv("SCAN_STATE_FILE", "scan_state.json")
 SCAN_CHAT_ID = int(os.getenv("SCAN_CHAT_ID", "0") or 0)
 SCAN_DEFAULT_ON = os.getenv("SCAN_DEFAULT_ON", "1") != "0"
-SCAN_INTERVAL_SEC = _env_float("SCAN_INTERVAL_SEC", 120)          # أسرع ليلتقط العملات الجديدة
+SCAN_INTERVAL_SEC = _env_float("SCAN_INTERVAL_SEC", 120)
 SCAN_HEARTBEAT_H = _env_float("SCAN_HEARTBEAT_H", 3)
-SCAN_CYCLE_TIMEOUT = _env_float("SCAN_CYCLE_TIMEOUT", 240)        # لا تتجاوز الدورة هذا الحد أبداً
-# مسار العملات المُثبّتة (جديدة نسبياً وكبيرة)
+SCAN_CYCLE_TIMEOUT = _env_float("SCAN_CYCLE_TIMEOUT", 240)
+
+# مسار العملات المُثبّتة
 SCAN_MIN_MC = _env_float("SCAN_MIN_MC", 60_000)
 SCAN_MAX_MC = _env_float("SCAN_MAX_MC", 100_000_000)
 SCAN_MIN_LIQ = _env_float("SCAN_MIN_LIQ", 15_000)
 SCAN_MIN_VOL1H = _env_float("SCAN_MIN_VOL1H", 8_000)
 SCAN_MIN_AGE_MIN = _env_float("SCAN_MIN_AGE_MIN", 30)
 SCAN_MAX_AGE_H = _env_float("SCAN_MAX_AGE_H", 72)
-# مسار العملات الناشئة (دقائق معدودة، ماركت كاب صغير)
+
+# مسار العملات الناشئة (مضبوط لالتقاط الزخم الحقيقي ومنع القمم الميتة مثل NEKOMARIO / Jet Ski Dog)
 ALPHA_ON = os.getenv("ALPHA_ON", "1") != "0"
-ALPHA_MIN_AGE_MIN = _env_float("ALPHA_MIN_AGE_MIN", 3)
-ALPHA_MAX_AGE_MIN = _env_float("ALPHA_MAX_AGE_MIN", 240)
-ALPHA_MIN_MC = _env_float("ALPHA_MIN_MC", 30_000)
-ALPHA_MAX_MC = _env_float("ALPHA_MAX_MC", 250_000)
-ALPHA_MIN_LIQ = _env_float("ALPHA_MIN_LIQ", 7_000)
-ALPHA_MIN_VOL1H = _env_float("ALPHA_MIN_VOL1H", 4_000)
-ALPHA_MIN_TXN5 = _env_float("ALPHA_MIN_TXN5", 15)
-ALPHA_MIN_CHG5 = _env_float("ALPHA_MIN_CHG5", 2.0)
-ALPHA_MIN_CHG1 = _env_float("ALPHA_MIN_CHG1", 8.0)
-ALPHA_MAX_CHG1 = _env_float("ALPHA_MAX_CHG1", 250.0)
-ALPHA_MIN_BUY = _env_float("ALPHA_MIN_BUY", 0.55)
-ALPHA_MIN_SCORE = int(_env_float("ALPHA_MIN_SCORE", 55))
+ALPHA_MIN_AGE_MIN = _env_float("ALPHA_MIN_AGE_MIN", 5)
+ALPHA_MAX_AGE_MIN = _env_float("ALPHA_MAX_AGE_MIN", 180)
+ALPHA_MIN_MC = _env_float("ALPHA_MIN_MC", 25_000)
+ALPHA_MAX_MC = _env_float("ALPHA_MAX_MC", 350_000)
+ALPHA_MIN_LIQ = _env_float("ALPHA_MIN_LIQ", 10_000)
+ALPHA_MIN_VOL1H = _env_float("ALPHA_MIN_VOL1H", 10_000)
+ALPHA_MIN_TXN5 = _env_float("ALPHA_MIN_TXN5", 25)
+ALPHA_MIN_CHG5 = _env_float("ALPHA_MIN_CHG5", 4.0)
+ALPHA_MIN_CHG1 = _env_float("ALPHA_MIN_CHG1", 12.0)
+ALPHA_MAX_CHG1 = _env_float("ALPHA_MAX_CHG1", 220.0)
+ALPHA_MIN_BUY = _env_float("ALPHA_MIN_BUY", 0.58)
+ALPHA_MIN_SCORE = int(_env_float("ALPHA_MIN_SCORE", 70))
+ALPHA_MIN_VOL_PACE = _env_float("ALPHA_MIN_VOL_PACE", 0.85)
+ALPHA_MAX_OFFPEAK_PCT = _env_float("ALPHA_MAX_OFFPEAK_PCT", 15)
+
 # أمان وسقوف
 SCAN_MAX_TOP10 = _env_float("SCAN_MAX_TOP10", 35)
 SCAN_MAX_ALERTS_HOUR = int(_env_float("SCAN_MAX_ALERTS_HOUR", 6))
 SCAN_COIN_COOLDOWN_H = _env_float("SCAN_COIN_COOLDOWN_H", 3)
-SCAN_MAX_HIGHRISK_HOUR = int(_env_float("SCAN_MAX_HIGHRISK_HOUR", 2))   # صفقات "مخاطرة Rug عالية" بالساعة
-ALPHA_MIN_HOLDERS = _env_float("ALPHA_MIN_HOLDERS", 60)                 # عدد مالكين أدنى (من RugCheck)
+SCAN_MAX_HIGHRISK_HOUR = int(_env_float("SCAN_MAX_HIGHRISK_HOUR", 2))
+ALPHA_MIN_HOLDERS = _env_float("ALPHA_MIN_HOLDERS", 60)
 RISK_HIGH_PTS = int(_env_float("RISK_HIGH_PTS", 5))
 RISK_MED_PTS = int(_env_float("RISK_MED_PTS", 3))
-GUARD_INTERVAL_SEC = _env_float("GUARD_INTERVAL_SEC", 15)               # حارس الصفقات المفتوحة
-GUARD_LIQ_DROP_PCT = _env_float("GUARD_LIQ_DROP_PCT", 35)               # سحب سيولة بعد الدخول
-GUARD_FLASH_PCT = _env_float("GUARD_FLASH_PCT", 30)                     # هبوط حاد خلال 4 دقائق
+GUARD_INTERVAL_SEC = _env_float("GUARD_INTERVAL_SEC", 15)
+GUARD_LIQ_DROP_PCT = _env_float("GUARD_LIQ_DROP_PCT", 35)
+GUARD_FLASH_PCT = _env_float("GUARD_FLASH_PCT", 30)
 SCAN_RUG_PER_CYCLE = int(_env_float("SCAN_RUG_PER_CYCLE", 10))
 SCAN_CANDLES_PER_CYCLE = int(_env_float("SCAN_CANDLES_PER_CYCLE", 6))
 SCAN_MAX_DISCOVER = 240
 DISCOVER_TIMEOUT = _env_float("DISCOVER_TIMEOUT", 90)
-ALPHA_OFFPEAK_PCT = _env_float("ALPHA_OFFPEAK_PCT", 25)      # السعر تحت قمة آخر 45د بهذه النسبة ⇒ وسم تحذير + خروج سريع (لا يمنع الإشارة)
-SCAN_BOUNCE_MIN_RR = _env_float("SCAN_BOUNCE_MIN_RR", 0)     # 0 = معطّل (لا حجب). مثال 0.9: يتجاهل ارتدادات R:R أقل من 0.9
-RE_VET_MIN = _env_float("RE_VET_MIN", 15)                    # إعادة الفحص الأمني للعملات التي فشلت سابقاً (دقائق)
-SHADOW_TTL_H = _env_float("SHADOW_TTL_H", 6)                 # تتبّع العملات التي لم تُرسَل (لأمر /missed)
+ALPHA_OFFPEAK_PCT = _env_float("ALPHA_OFFPEAK_PCT", 25)
+SCAN_BOUNCE_MIN_RR = _env_float("SCAN_BOUNCE_MIN_RR", 0)
+RE_VET_MIN = _env_float("RE_VET_MIN", 15)
+SHADOW_TTL_H = _env_float("SHADOW_TTL_H", 6)
 SHADOW_MAX = 500
-SHADOW_MIN_GAIN = _env_float("SHADOW_MIN_GAIN", 40)          # اعتبار الفرصة فاتت إذا ركضت هذا الحد بعد رؤيتها
+SHADOW_MIN_GAIN = _env_float("SHADOW_MIN_GAIN", 40)
 SCAN_UNIVERSE_H = 12
 SCAN_MOMENTUM = os.getenv("SCAN_MOMENTUM", "1") != "0"
 SCAN_MIN_SCORE = int(_env_float("SCAN_MIN_SCORE", 75))
@@ -2469,11 +2431,9 @@ _DISC: dict = {"n": 0}
 
 
 async def discover_candidates(client: httpx.AsyncClient, partial: Optional[dict] = None):
-    """مصادر مجانية متوازية بمهلة لكل مصدر: GeckoTerminal (أحدث الأزواج صفحات 1–3 + Trending 5د/1س)
-    و DexScreener (ملفات/تعزيزات). فشل أي مصدر لا يوقف البقية. يرجع (قائمة فريدة، {مصدر: عدد أو -1})."""
     found: dict = {}
     stats: dict = {}
-    if partial is not None:           # يراه scan_cycle حتى لو انتهت المهلة الكلية: نحتفظ بما وصل
+    if partial is not None:
         partial["found"], partial["stats"] = found, stats
 
     def _keep(name, mints):
@@ -2529,7 +2489,7 @@ async def discover_candidates(client: httpx.AsyncClient, partial: Optional[dict]
 
     _DISC["n"] += 1
     tasks = []
-    if _DISC["n"] % 2 == 1:        # مصادر الملفات/التعزيزات (حد 60/د) كل دورة ثانية فقط
+    if _DISC["n"] % 2 == 1:
         tasks = [dex("dex_profiles", f"{DEX}/token-profiles/latest/v1"),
                  dex("dex_boosts", f"{DEX}/token-boosts/latest/v1"),
                  dex("dex_boosts_top", f"{DEX}/token-boosts/top/v1")]
@@ -2539,7 +2499,6 @@ async def discover_candidates(client: httpx.AsyncClient, partial: Optional[dict]
         if isinstance(r, Exception):
             continue
         ordered += r if isinstance(r, list) else [r]
-    # الأحدث أولاً: صفحات الأزواج الجديدة ثم Trending ثم DexScreener
     ordered.sort(key=lambda t: (0 if t[0].startswith(("gecko_new", "jup_recent")) else 1 if t[0].startswith(("gecko_trend", "jup_")) else 2))
     for name, mints in ordered:
         stats[name] = len(mints) if mints is not None else -1
@@ -2549,7 +2508,6 @@ async def discover_candidates(client: httpx.AsyncClient, partial: Optional[dict]
 
 
 def scan_lane(m: dict):
-    """يصنّف العملة: ('alpha'|'est', None) أو (None, سبب الرفض)."""
     if m["dex"] == "pumpfun":
         return None, "لم تهاجر"
     if m["price"] <= 0:
@@ -2601,14 +2559,25 @@ def bounce_prescreen(m: dict) -> float:
 
 
 def alpha_ok(m: dict) -> bool:
-    """زخم حقيقي لعملة ناشئة: صعود 5د و1س، مشترون يسيطرون، وتداول فعلي. (تراجع الفوليوم/الرسوم لا يمنعها)."""
+    """زخم حقيقي لعملة ناشئة: صعود 5د و1س، سيطرة مشترين، وتدفق فوليوم/رسوم متسارع أو مستقر (يمنع NEKOMARIO 0.3x)."""
     txn5 = (m.get("buys5") or 0) + (m.get("sells5") or 0)
-    return (m["chg5"] >= ALPHA_MIN_CHG5 and ALPHA_MIN_CHG1 <= m["chg1"] <= ALPHA_MAX_CHG1
-            and m["buy_ratio5"] >= ALPHA_MIN_BUY and (txn5 >= ALPHA_MIN_TXN5 or txn5 == 0))
+    vol_pace = m.get("vol_pace", 0.0)
+    if vol_pace < ALPHA_MIN_VOL_PACE:
+        return False
+    if m["mcap"] > 0 and (m["vol5"] / m["mcap"]) < 0.03:
+        return False
+    return (
+        m["chg5"] >= ALPHA_MIN_CHG5
+        and ALPHA_MIN_CHG1 <= m["chg1"] <= ALPHA_MAX_CHG1
+        and m["buy_ratio5"] >= ALPHA_MIN_BUY
+        and (txn5 >= ALPHA_MIN_TXN5 or txn5 == 0)
+    )
 
 
 def alpha_prescreen(m: dict) -> float:
-    return m["chg5"] + m["chg1"] / 5 + (m["buy_ratio5"] - 0.5) * 30
+    pace_bonus = min(m.get("vol_pace", 1.0), 3.0) * 12.0
+    liq_bonus = min(m.get("liq_mcap", 0.0), 0.25) * 40.0
+    return m["chg5"] + (m["chg1"] / 6.0) + (m["buy_ratio5"] - 0.5) * 35.0 + pace_bonus + liq_bonus
 
 
 def scan_secure(sec: "Security") -> bool:
@@ -2616,7 +2585,6 @@ def scan_secure(sec: "Security") -> bool:
 
 
 def rug_risk(m: dict, holders: Optional[float]) -> tuple:
-    """درجة مخاطرة Rug بعوامل قابلة للتفسير. ترجع (مستوى، نقاط، أسباب)."""
     pts, why = 0, []
     pace = m.get("vol_pace", 1.0)
     if pace < 0.3:
@@ -2662,7 +2630,6 @@ def risk_text(lvl: str, pts: int, why: list) -> str:
 
 
 def tighten_plan(plan, max_risk: float = 0.10) -> None:
-    """للعملات عالية المخاطرة: وقف أضيق (حتى −10%) مع إعادة حساب R:R."""
     try:
         if plan.entry > 0 and (plan.entry - plan.sl) / plan.entry > max_risk:
             plan.sl = plan.entry * (1 - max_risk)
@@ -2675,7 +2642,6 @@ def tighten_plan(plan, max_risk: float = 0.10) -> None:
 
 
 def scan_risk_gate(sc: dict, u: dict, m: dict):
-    """يحسب المخاطرة ويطبّق سقف الصفقات عالية المخاطرة. يرجع (مستوى، نص، مسموح؟)."""
     lvl, pts, why = rug_risk(m, u.get("holders"))
     now = time.time()
     sc["hr"] = [t for t in sc.get("hr", []) if now - t < 3600]
@@ -2693,7 +2659,6 @@ def quick_exit_line(lvl: str, entry: float) -> str:
 
 
 def offpeak_pct(candles: list, price: float, lookback: int = 45) -> float:
-    """كم نسبة السعر الحالي تحت أعلى سعر في آخر ~45 شمعة دقيقة (0 إذا لا شموع)."""
     try:
         if not candles or price <= 0:
             return 0.0
@@ -2704,7 +2669,6 @@ def offpeak_pct(candles: list, price: float, lookback: int = 45) -> float:
 
 
 def shadow_note(sc: dict, m: dict, why: str, stage: str) -> None:
-    """يسجّل عملة نشطة لم نرسلها (السعر عند أول رؤية) لنعرف لاحقاً إن كانت فرصة فاتت ولماذا."""
     sh = sc.setdefault("shadow", {})
     e = sh.get(m["mint"])
     if e is None:
@@ -2713,7 +2677,7 @@ def shadow_note(sc: dict, m: dict, why: str, stage: str) -> None:
         sh[m["mint"]] = {"sym": m["symbol"], "t0": time.time(), "p0": m["price"], "mc0": m["mcap"],
                          "pmax": m["price"], "age0": m.get("age_min"), "why": why, "stage": stage}
     else:
-        e["why"], e["stage"] = why, stage          # آخر سبب؛ السعر المرجعي يبقى أول رؤية
+        e["why"], e["stage"] = why, stage
 
 
 def shadow_watch(sc: dict, limit: int = 60) -> list:
@@ -2739,7 +2703,6 @@ def shadow_update(sc: dict, metrics: dict, now: float) -> None:
 
 
 def scan_why_not(m: dict, u: dict, lane: str, picked: bool, tried: bool) -> tuple:
-    """لماذا لم تُرسَل هذه العملة؟ (نص، مرحلة)."""
     if u.get("sec_ok") is None:
         return "بانتظار الفحص الأمني (طابور)", "طابور الفحص"
     if u.get("sec_ok") is False:
@@ -2749,7 +2712,7 @@ def scan_why_not(m: dict, u: dict, lane: str, picked: bool, tried: bool) -> tupl
         if h is not None and h < ALPHA_MIN_HOLDERS:
             return f"مالكون قليلون ({h:.0f})", "مالكون"
         if not alpha_ok(m):
-            return (f"زخم غير كافٍ (5د {m['chg5']:+.0f}% • 1س {m['chg1']:+.0f}% • شراء {m['buy_ratio5'] * 100:.0f}%)", "الزخم")
+            return (f"زخم/فوليوم غير كافٍ (5د {m['chg5']:+.0f}% • 1س {m['chg1']:+.0f}% • pace {m.get('vol_pace', 0):.2f}x • شراء {m['buy_ratio5'] * 100:.0f}%)", "الزخم")
     if not picked:
         return "لا ارتداد ولا زخم (قبل الشموع)", "لا إعداد"
     if not tried:
@@ -2775,7 +2738,6 @@ def record_auto(bd: dict, it: dict, m: dict, sec: Optional["Security"], kind: st
 
 
 def scan_it(chat: int, m: dict, sec: "Security") -> dict:
-    """عنصر خفيف لتنسيق التنبيه — لا يدخل قائمة المراقبة إطلاقاً (فصل تام)."""
     return {"uid": chat, "chat": chat, "mint": m["mint"], "sym": m["symbol"], "name": m["name"], "pair": m["pair"],
             "factor": (m["mcap"] / m["price"]) if m["price"] > 0 else 0.0, "sec_txt": sec_brief(sec),
             "alerted": [], "zones": []}
@@ -2798,7 +2760,6 @@ def _add_pos(sc: dict, m: dict, kind: str, entry: float, sl: float, tp1: float, 
 
 
 async def scan_track_positions(app: Application, sc: dict, metrics: dict) -> None:
-    """متابعة صفقات المسح (TP1/TP2/SL) بذاتها، دون المرور بقائمة المراقبة."""
     pos = sc.get("pos") or {}
     chat = sc.get("chat")
     for mint, p in list(pos.items()):
@@ -2827,7 +2788,6 @@ async def scan_track_positions(app: Application, sc: dict, metrics: dict) -> Non
 
 
 async def scan_guard_cycle(app: Application) -> None:
-    """يراقب الصفقات المفتوحة كل ~25ث: سحب سيولة، هبوط حاد، TP0/TP1/TP2/SL — وينبّه فوراً."""
     bd = app.bot_data
     sc = bd.get("scan") or {}
     pos = sc.get("pos") or {}
@@ -2922,7 +2882,6 @@ async def scan_cycle(app: Application) -> dict:
           "vet_fail": 0, "candles": 0, "setups": 0, "alerts": 0, "skipped": {}, "regime": None, "phases": {}}
     uni: dict = sc.setdefault("uni", {})
 
-    # 1) اكتشاف (مصادر متوازية، لا يوقفه فشل أي مصدر)
     part: dict = {}
     try:
         addrs, st["sources"] = await asyncio.wait_for(discover_candidates(client, part), timeout=DISCOVER_TIMEOUT)
@@ -2933,7 +2892,6 @@ async def scan_cycle(app: Application) -> dict:
     st["discovered"] = len(addrs)
     st["phases"]["discover"] = round(time.time() - t0, 1)
 
-    # 2) بيانات السوق: المكتشف + الكون + صفقات المسح المفتوحة
     t1 = time.time()
     _sw = shadow_watch(sc)
     all_addrs = list(dict.fromkeys(addrs + list(uni) + list((sc.get("pos") or {})) + _sw))[:320]
@@ -2950,16 +2908,15 @@ async def scan_cycle(app: Application) -> dict:
         if mm:
             metrics[mm["mint"]] = mm
     st["metrics"] = len(metrics)
-    sc["empty"] = not metrics            # دورة بلا أي بيانات (غالباً 429) ⇒ تراجع أسّي في الحلقة
+    sc["empty"] = not metrics
     st["phases"]["metrics"] = round(time.time() - t1, 1)
     await scan_track_positions(app, sc, metrics)
     shadow_update(sc, metrics, now)
 
-    # 3) تصنيف المسارات + إدارة الكون
     lanes: dict = {}
     reasons: Counter = Counter()
     for mint, m in metrics.items():
-        if mint in shadow_only:          # جُلبت فقط لتتبّع الفرص الفائتة: لا تدخل الكون
+        if mint in shadow_only:
             continue
         lane, why = scan_lane(m)
         if not lane:
@@ -2973,7 +2930,7 @@ async def scan_cycle(app: Application) -> dict:
                                   "candle_ts": 0.0, "sym": m["symbol"]})
         u["miss"] = 0
         u["lane"] = lane
-    fetch_healthy = (not all_addrs) or len(metrics) >= max(3, 0.3 * len(all_addrs))   # فشل الجلب ≠ غياب العملة
+    fetch_healthy = (not all_addrs) or len(metrics) >= max(3, 0.3 * len(all_addrs))
     for mint in list(uni):
         if mint not in metrics and fetch_healthy:
             uni[mint]["miss"] = uni[mint].get("miss", 0) + 1
@@ -2987,8 +2944,7 @@ async def scan_cycle(app: Application) -> dict:
     st["regime"] = regime
     sc["regime"] = regime
 
-    # 4) فحص أمني أصرم متوازٍ (دفعة صغيرة + مهلة)، الناشئة أولاً
-    for _mt, _u in uni.items():          # إعادة فحص العملات التي فشلت سابقاً (قد تنظّف/يتغيّر وضعها) — إضافة لا حجب
+    for _mt, _u in uni.items():
         if (_u.get("sec_ok") is False and _mt in lanes and _u.get("vet_n", 0) < 3
                 and now - _u.get("vet_ts", now) >= RE_VET_MIN * 60):
             _m = metrics[_mt]
@@ -3006,7 +2962,6 @@ async def scan_cycle(app: Application) -> dict:
             log.warning("scan vetting timed out")
     st["phases"]["vet"] = round(time.time() - t2, 1)
 
-    # 5) اختيار من نجلب شموعه: الناشئة بزخم حقيقي أولاً ثم ارتداد/زخم المُثبّتة
     picks = []
     for mint, u in uni.items():
         m = metrics.get(mint)
@@ -3016,6 +2971,9 @@ async def scan_cycle(app: Application) -> dict:
             h_ = u.get("holders")
             if h_ is not None and h_ < ALPHA_MIN_HOLDERS:
                 st["skipped"]["مالكون قليلون"] = st["skipped"].get("مالكون قليلون", 0) + 1
+                continue
+            if m.get("vol_pace", 0.0) < ALPHA_MIN_VOL_PACE:
+                st["skipped"]["تراجع الفوليوم/الرسوم"] = st["skipped"].get("تراجع الفوليوم/الرسوم", 0) + 1
                 continue
             if m.get("vol_pace", 1.0) < 0.5 and m["chg1"] > 150:
                 st["skipped"]["صعود متأخر بنشاط ينهار"] = st["skipped"].get("صعود متأخر بنشاط ينهار", 0) + 1
@@ -3030,11 +2988,10 @@ async def scan_cycle(app: Application) -> dict:
             picks.append((ps, mint))
     picks.sort(reverse=True)
 
-    # 6) تحليل واستراتيجية حسب نوع السوق
     t3 = time.time()
     for _, mint in picks[:SCAN_CANDLES_PER_CYCLE]:
         _gk = gecko_open()
-        if _gk and lanes.get(mint) != "alpha":      # الارتداد يحتاج شموعاً؛ الناشئة (alpha) تكمل بلا شموع (كما كانت تفعل عند فشلها)
+        if _gk and lanes.get(mint) != "alpha":
             st["skipped"]["GeckoTerminal في تبريد"] = st["skipped"].get("GeckoTerminal في تبريد", 0) + 1
             continue
         if time.time() - t0 > SCAN_CYCLE_TIMEOUT - 25:
@@ -3054,8 +3011,8 @@ async def scan_cycle(app: Application) -> dict:
         sent = False
         try:
             if lanes.get(mint) == "alpha":
-                if regime["state"] == "bleeding" and m["chg5"] < ALPHA_MIN_CHG5 * 2:
-                    st["skipped"]["سوق نازف: زخم غير كافٍ"] = st["skipped"].get("سوق نازف: زخم غير كافٍ", 0) + 1
+                if regime["state"] == "bleeding":
+                    st["skipped"]["سوق نازف: حظر الناشئة"] = st["skipped"].get("سوق نازف: حظر الناشئة", 0) + 1
                 else:
                     st["setups"] += 1
                     sent = await scan_send_alpha(app, sc, u, m, candles, regime, chat)
@@ -3156,35 +3113,31 @@ async def scan_send_momentum(app, sc: dict, u: dict, m: dict, candles: list, reg
 
 
 async def scan_send_alpha(app, sc: dict, u: dict, m: dict, candles: list, regime: dict, chat: int) -> bool:
-    """عملة ناشئة: زخم حقيقي + أمان صارم + مخاطرة Rug معلنة. الشموع القليلة لا تمنعها."""
+    """عملة ناشئة: زخم حقيقي + فوليوم/رسوم متسارعة + أمان صارم + رفض الابتعاد الكبير عن القمة."""
     bd = app.bot_data
     plan = compute_alt_plan("MOMENTUM", m, candles)
     score, b = compute_score(m, u["sec_obj"], plan)
     if score < ALPHA_MIN_SCORE:
         return False
-    lvl, rtxt, ok = scan_risk_gate(sc, u, m)
-    if not ok:
-        return False
-    if lvl == "high":
-        tighten_plan(plan, 0.10)
     off = offpeak_pct(candles, m["price"])
+    if off > ALPHA_MAX_OFFPEAK_PCT:
+        return False
+    lvl, rtxt, ok = scan_risk_gate(sc, u, m)
+    if not ok or lvl == "high":
+        return False
     late = off >= ALPHA_OFFPEAK_PCT
-    xl = "med" if (late and lvl == "low") else lvl
-    late_line = (f"⚠️ <b>السعر {off:.0f}% تحت قمة آخر 45 دقيقة</b> — ليس زخماً صاعداً بل ارتداد من هبوط: "
-                 "ادخل بحجم صغير أو انتظر تأكيداً.\n") if late else ""
+    late_line = (f"⚠️ <b>السعر {off:.0f}% تحت قمة آخر 45 دقيقة</b> — ادخل بحجم حذر.\n") if late else ""
     it = scan_it(chat, m, u["sec_obj"])
     c = Candidate(m, u["sec_obj"], plan, score, b)
     age = m.get("age_min") or 0
     holders = u.get("holders")
     head = scan_header("🆕 عملة ناشئة", regime) + (
         f"⏱ عمر الزوج {age:.0f} دقيقة • MC {fmt_usd(m['mcap'])} • سيولة {fmt_usd(m['liq'])} • "
-        f"5د {m['chg5']:+.0f}% • 1س {m['chg1']:+.0f}% • شراء {m['buy_ratio5'] * 100:.0f}%"
+        f"5د {m['chg5']:+.0f}% • 1س {m['chg1']:+.0f}% • فوليوم 5د ×{m.get('vol_pace', 0):.1f} • شراء {m['buy_ratio5'] * 100:.0f}%"
         + (f" • {holders:.0f} مالك" if holders is not None else "") + "\n"
-        f"🛡️ {html.escape(u.get('sec_txt') or '')}\n" + rtxt + "\n" + late_line + quick_exit_line(xl, plan.entry) + "\n")
-    tp0 = plan.entry * (1.08 if xl == "high" else 1.10) if xl != "low" else None
+        f"🛡️ {html.escape(u.get('sec_txt') or '')}\n" + rtxt + "\n" + late_line + quick_exit_line(lvl, plan.entry) + "\n")
+    tp0 = plan.entry * 1.10 if lvl != "low" else None
     await notify(app, it, head + format_best(c, []))
-    if lvl == "high":
-        sc.setdefault("hr", []).append(time.time())
     _add_pos(sc, m, "AUTOM", plan.entry, plan.sl, plan.tp1, plan.tp2, tp0)
     record_auto(bd, it, m, u["sec_obj"], "AUTOM", score, "", plan.entry, plan.sl, plan.tp1, plan.tp2,
                 f"عملة ناشئة (مخاطرة {lvl})")
@@ -3229,7 +3182,6 @@ def scan_status_text(sc: dict) -> str:
 
 
 async def scan_loop(app: Application) -> None:
-    """حلقة مستقلة: كل دورة بمهلة صارمة، وأي فشل لا يوقفها، وتنام دائماً بين الدورات."""
     await asyncio.sleep(75)
     while True:
         sc = app.bot_data.setdefault("scan", {"on": SCAN_DEFAULT_ON, "chat": 0})
@@ -3258,7 +3210,6 @@ async def scan_loop(app: Application) -> None:
             sc["fails"] = sc.get("fails", 0) + 1
             log.exception("scan cycle failed")
             sc["err"], sc["err_ts"] = f"{type(e).__name__}: {e}"[:160], time.time()
-        # تراجع أسّي عند الفشل المتكرر (حد أقصى 10 دقائق)، وإلا الفاصل العادي
         await asyncio.sleep(min(600.0, SCAN_INTERVAL_SEC * (2 ** min(sc.get("fails", 0), 3))) if sc.get("fails") else SCAN_INTERVAL_SEC)
 
 
@@ -3284,7 +3235,7 @@ async def scan_on_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     save_scan_state(sc)
     await update.effective_message.reply_text(
         "🤖 تم تفعيل مسح السوق 24/24 لهذه المحادثة (يصلح للمجموعات أيضاً: أرسل الأمر داخل المجموعة).\n"
-        f"🆕 ناشئة: عمر {ALPHA_MIN_AGE_MIN:.0f}–{ALPHA_MAX_AGE_MIN:.0f} دقيقة • MC {fmt_usd(ALPHA_MIN_MC)}–{fmt_usd(ALPHA_MAX_MC)} • زخم حقيقي\n"
+        f"🆕 ناشئة: عمر {ALPHA_MIN_AGE_MIN:.0f}–{ALPHA_MAX_AGE_MIN:.0f} دقيقة • MC {fmt_usd(ALPHA_MIN_MC)}–{fmt_usd(ALPHA_MAX_MC)} • زخم وفوليوم متسارع\n"
         f"🏛️ مُثبّتة: MC {fmt_usd(SCAN_MIN_MC)}–{fmt_usd(SCAN_MAX_MC)} • عمر {SCAN_MIN_AGE_MIN:.0f} دقيقة–{SCAN_MAX_AGE_H:.0f} ساعة • ارتداد/زخم\n"
         f"🛡️ فحص أمني صارم لكليهما • أقصى {SCAN_MAX_ALERTS_HOUR} صفقات/ساعة • مسح كل {SCAN_INTERVAL_SEC / 60:.0f} دقائق.\n"
         f"رقم هذه المحادثة: {update.effective_chat.id} — ضعه في SCAN_CHAT_ID على Render ليبقى بعد أي نشر.\n"
@@ -3304,7 +3255,6 @@ async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def missed_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """الفرص التي ركضت بعد أن رآها المسح ولم يرسلها، مع سبب عدم الإرسال (لضبط الفلاتر بالأدلة)."""
     sc = context.application.bot_data.get("scan") or {}
     sh = sc.get("shadow") or {}
     cool, posd = sc.get("cool") or {}, sc.get("pos") or {}
@@ -3386,7 +3336,6 @@ async def track_setup(app: Application, it: dict, m: dict) -> None:
 
 
 async def evaluate_pending(app: Application, it: dict, m: dict, store: dict) -> None:
-    """عملة حديثة/على Bonding Curve نضجت: فلتر أولي ثم فحص أمني. تُسحب أو تصبح آمنة."""
     client = app.bot_data["http"]
     sym = html.escape(it["sym"])
     reason = pre_filter(m)
@@ -3416,17 +3365,16 @@ async def evaluate_pending(app: Application, it: dict, m: dict, store: dict) -> 
 
 
 AUTO_PURGE = os.getenv("AUTO_PURGE", "1") != "0"
-PURGE_COLLAPSE_PCT = _env_float("PURGE_COLLAPSE_PCT", 75)     # انهيار من أعلى سعر منذ المراقبة
-PURGE_FLASH_PCT = _env_float("PURGE_FLASH_PCT", 45)           # هبوط حاد خلال 10 دقائق
-PURGE_LIQ_DROP_PCT = _env_float("PURGE_LIQ_DROP_PCT", 60)     # سحب سيولة من أعلى سيولة
+PURGE_COLLAPSE_PCT = _env_float("PURGE_COLLAPSE_PCT", 75)
+PURGE_FLASH_PCT = _env_float("PURGE_FLASH_PCT", 45)
+PURGE_LIQ_DROP_PCT = _env_float("PURGE_LIQ_DROP_PCT", 60)
 PURGE_MIN_LIQ = _env_float("PURGE_MIN_LIQ", 3000)
-PURGE_MISS_CYCLES = int(_env_float("PURGE_MISS_CYCLES", 6))   # اختفاء الزوج من DexScreener
-PURGE_RECHECK_MIN = _env_float("PURGE_RECHECK_MIN", 20)       # إعادة الفحص الأمني الدوري
+PURGE_MISS_CYCLES = int(_env_float("PURGE_MISS_CYCLES", 6))
+PURGE_RECHECK_MIN = _env_float("PURGE_RECHECK_MIN", 20)
 WATCH_MAX_TOTAL = int(_env_float("WATCH_MAX_TOTAL", 80))
 
 
 def purge_reason(it: dict, m: dict, now: float) -> Optional[str]:
-    """سبب الحذف الفوري لعملة ميتة/مشبوهة (انهيار، هبوط حاد، سحب سيولة)، أو None."""
     price, liq = m["price"], m["liq"]
     it["peak_price"] = max(it.get("peak_price", 0.0), price)
     it["peak_liq"] = max(it.get("peak_liq", 0.0), liq)
@@ -3443,7 +3391,6 @@ def purge_reason(it: dict, m: dict, now: float) -> Optional[str]:
 
 
 async def purge_notify(app: Application, purged: list) -> None:
-    """رسالة واحدة مجمّعة لكل محادثة بالعملات التي أُزيلت (حتى لا نغرقك بالرسائل)."""
     by_chat: dict = {}
     for it, why in purged:
         by_chat.setdefault(it["chat"], []).append(f"• {html.escape(it['sym'])}: {html.escape(why)}")
@@ -3499,7 +3446,7 @@ async def watch_cycle(app: Application) -> None:
         log.exception("compute_regime failed")
         regime = {"state": "neutral", "wr": None, "breadth": None}
     bd["regime"] = regime
-    for it in store.values():                 # عملة "ساخنة": ارتفعت 1.5–15% عن أدنى سعر آخر 20 دقيقة → فحص أسرع
+    for it in store.values():
         mm = metrics.get(it["mint"])
         if mm and mm["price"] > 0 and not it.get("off"):
             px = it.setdefault("px", [])
@@ -3561,7 +3508,7 @@ async def watch_cycle(app: Application) -> None:
             continue
         candle_budget -= 1
         it["candle_ts"] = time.time()
-        candles = await fetch_candles(client, m["pair"], 1, 1000)     # طلب واحد كالسابق، بتاريخ أطول
+        candles = await fetch_candles(client, m["pair"], 1, 1000)
         try:
             store_hist(bd, it, candles)
             if candles:
@@ -3690,9 +3637,9 @@ async def unwatch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 # ───────────────────────────── تتبع نتائج الصفقات + تقرير /report ─────────────────────────────
 TRACK_FILE = os.getenv("TRACK_FILE", "tracker.json")
-TRACK_WINDOW_HOURS = _env_float("TRACK_WINDOW_HOURS", 24)     # مدة تتبع كل سجل بعد الإشارة
-TRACK_KEEP_HOURS = 48                                          # أطول مدة نحتفظ فيها بالسجلات
-REPORT_MAX_SETTLE = int(_env_float("REPORT_MAX_SETTLE", 40))   # أقصى عدد سجلات تُحسم بالشموع في التقرير
+TRACK_WINDOW_HOURS = _env_float("TRACK_WINDOW_HOURS", 24)
+TRACK_KEEP_HOURS = 48
+REPORT_MAX_SETTLE = int(_env_float("REPORT_MAX_SETTLE", 40))
 
 KEY_LABEL = {
     "chase": "مطاردة بعد صعود قوي", "pace": "فوليوم يتباطأ", "sell": "ضغط بيع", "liq": "سيولة ضعيفة",
@@ -3766,7 +3713,6 @@ def _dup(store: dict, uid: int, mint: str, decision: str, window_sec: float) -> 
 
 
 def record_scan(bd: dict, uid: int, chat_id: int, res: "ScanResult") -> int:
-    """يسجّل كل ما حلّله /best: الرئيسية والبدائل والمرفوضة والمراقَبة، لقياس نتائجها لاحقاً."""
     store = bd.setdefault("track", {})
     seen: dict = {}
     for c in res.ranked:
@@ -3831,7 +3777,7 @@ def track_update(r: dict, price: float, now: float) -> None:
         elif price >= r["tp1"]:
             r["first"], r["t_first"] = "TP1", now
         if r["first"]:
-            r["hi_f"], r["lo_f"] = r["hi"], r["lo"]            # أقصى/أدنى سعر حتى لحظة الحسم فقط
+            r["hi_f"], r["lo_f"] = r["hi"], r["lo"]
     if r["first"] == "TP1" and price >= r["tp2"]:
         r["hit2"] = True
 
@@ -3868,7 +3814,7 @@ async def tracker_cycle(app: Application) -> None:
     save_track(bd)
 
 
-REPORT_ENTRY_DELAY_SEC = _env_float("REPORT_ENTRY_DELAY_SEC", 60)   # زمن واقعي بين وصول التنبيه وتنفيذك
+REPORT_ENTRY_DELAY_SEC = _env_float("REPORT_ENTRY_DELAY_SEC", 60)
 PATH_MINUTES = 240
 
 
@@ -3914,8 +3860,6 @@ def _walk(r: dict, cs: list, entry: float, sl: float, tp1: float, tp2: float) ->
 
 
 def _settle_candles(r: dict, candles: list, delay: Optional[float] = None) -> Optional[dict]:
-    """يحسم من شموع 1د. الدخول بعد REPORT_ENTRY_DELAY_SEC من التنبيه (واقعي)، والوقف/الهدف بنفس نسبهما.
-    ضرب الوقف والهدف في الدقيقة نفسها يُحسب خسارة (تحفظاً)."""
     delay = REPORT_ENTRY_DELAY_SEC if delay is None else delay
     after = [c for c in candles if c[0] >= r["ts"]]
     cs = [c for c in after if c[0] >= r["ts"] + delay]
@@ -3942,7 +3886,6 @@ def _settle_candles(r: dict, candles: list, delay: Optional[float] = None) -> Op
 
 
 async def settle_all(client: httpx.AsyncClient, recs: list, status=None) -> list:
-    """يجلب شموع كل عملة (pool) مرة واحدة بفاصل يحترم حدّ GeckoTerminal (30/د)، ويحسم صفقات الخطة بها."""
     now = time.time()
     pools = list({r["pair"] for r in recs if r["sl"] is not None and r.get("pair") and now - r["ts"] < 16 * 3600})
     cache: dict = {}
@@ -3969,7 +3912,6 @@ async def settle_all(client: httpx.AsyncClient, recs: list, status=None) -> list
 
 
 def _simulate(r: dict, path: list, delay: float, sl_mult: float, tp_mult: float) -> Optional[float]:
-    """يعيد R لصفقة بافتراضات مختلفة (تأخير دخول/اتساع الوقف/قرب الهدف) من المسار المحفوظ."""
     cs = [c for c in path if c[0] >= delay]
     if len(cs) < 2 or not r.get("entry"):
         return None
@@ -4066,7 +4008,6 @@ def _mean(vals: list) -> Optional[float]:
 
 
 def build_report(settled: list, hours: float):
-    """يرجع (قائمة رسائل HTML، بيانات JSON bytes)."""
     trades = [(r, x) for r, x in settled if r["sl"] is not None and r["decision"] != "auto"]
     auto_t = [(r, x, _outcome(r, x)) for r, x in settled if r["sl"] is not None and r["decision"] == "auto"]
     others = [(r, x) for r, x in settled if r["sl"] is None]
@@ -4311,7 +4252,6 @@ def _manual_store(bd: dict, uid: int) -> dict:
 
 
 async def on_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """يلتقط العقود من رسالة نصية أو محوّلة (Forward) ويحفظها لهذا المستخدم."""
     msg = update.effective_message
     user = update.effective_user
     if msg is None or user is None:
@@ -4319,18 +4259,18 @@ async def on_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     parts = [msg.text or msg.caption or ""]
     for ent in list(msg.entities or []) + list(msg.caption_entities or []):
         if getattr(ent, "url", None):
-            parts.append(ent.url)                       # رابط مخفي خلف نص
+            parts.append(ent.url)
     rm = getattr(msg, "reply_markup", None)
     for row in getattr(rm, "inline_keyboard", None) or []:
         for b in row:
             if getattr(b, "url", None):
-                parts.append(b.url)                     # أزرار الرسالة المحوّلة
+                parts.append(b.url)
     mints, hints = extract_addresses("\n".join(parts))
     if not (mints or hints):
         await msg.reply_text("لم أجد عنوان عقد Solana في هذه الرسالة. الصق العقد أو حوّل لي رسالة الإشارة، ثم أرسل /best.")
         return
 
-    ts, post_id = None, 0                               # ts يبقى None للصق العادي
+    ts, post_id = None, 0
     fo = getattr(msg, "forward_origin", None)
     if fo is not None:
         d = getattr(fo, "date", None)
@@ -4338,247 +4278,245 @@ async def on_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         chat = getattr(fo, "chat", None)
         if chat is not None and (getattr(chat, "username", "") or "").lower() == SIGNAL_CHANNEL.lower():
             post_id = getattr(fo, "message_id", 0) or 0
-    elif getattr(msg, "forward_date", None):            # توافق مع إصدارات PTB الأقدم
+    if ts is None and getattr(msg, "forward_date", None):
         ts = msg.forward_date.timestamp()
-        fc = getattr(msg, "forward_from_chat", None)
-        if fc is not None and (getattr(fc, "username", "") or "").lower() == SIGNAL_CHANNEL.lower():
-            post_id = getattr(msg, "forward_from_message_id", 0) or 0
 
     store = _manual_store(context.application.bot_data, user.id)
     now = time.time()
-    fresh = already = 0
     for a in mints:
-        prev = store.get(a)
-        if prev is not None and prev.done:           # حُلِّلت سابقاً وهي تحت المراقبة
-            already += 1
-            continue
-        store[a] = Signal(a, post_id, ts, False, True, now)
-        fresh += 1
+        store[a] = Signal(a, post_id, ts, is_hint=False, manual=True, added=now)
     for a in hints:
         if a not in store:
-            store[a] = Signal(a, post_id, ts, True, True, now)
-            fresh += 1
+            store[a] = Signal(a, post_id, ts, is_hint=True, manual=True, added=now)
     while len(store) > MANUAL_MAX:
-        store.pop(min(store, key=lambda k: store[k].added), None)
-    pending = sum(1 for s in store.values() if not s.done)
+        oldest = min(store, key=lambda k: store[k].added)
+        store.pop(oldest, None)
+
+    n = len(mints) + len(hints)
     await msg.reply_text(
-        (f"✅ استلمت {fresh} عقد جديد." if fresh else "ℹ️ لا عقود جديدة في هذه الرسالة.")
-        + (f"\n♻️ {already} عقد محلَّل سابقاً وتحت المراقبة — لن أعيد تحليله." if already else "")
-        + f"\nبانتظار التحليل: {pending}. أرسل /best لتحليل الجديد فقط (و/best all لإعادة تحليل الكل)."
+        f"✅ سجّلتُ {n} عقد{'اً' if n > 1 else ''} ({len(store)} في قائمتك اليدوية، صالحة {MANUAL_TTL_HOURS:.0f}h). أرسل /best لتحليله."
     )
 
 
 async def clear_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    store = _manual_store(context.application.bot_data, update.effective_user.id)
-    n = len(store)
-    store.clear()
-    await update.effective_message.reply_text(f"🧹 مُسح {n} عقد.")
+    user = update.effective_user
+    if user is None:
+        return
+    store = context.application.bot_data.get("manual", {}).pop(user.id, None) or {}
+    await update.effective_message.reply_text(f"🧹 مسحتُ {len(store)} عقداً من قائمتك اليدوية.")
 
 
 async def best_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     msg = update.effective_message
+    user = update.effective_user
+    if msg is None or user is None:
+        return
     bd = context.application.bot_data
-
-    wait = _cooldown_wait(bd, update.effective_user.id)
+    wait = _cooldown_wait(bd, user.id)
     if wait:
-        await msg.reply_text(f"⏱️ انتظر {wait} ثانية قبل فحص جديد.")
+        await msg.reply_text(f"⏳ انتظر {wait} ثانية قبل إعادة الطلب.")
+        return
+    lock = bd["scan_lock"]
+    if lock.locked():
+        await msg.reply_text("⏳ هناك فحص جارٍ الآن، انتظر قليلاً ثم جرّب /best.")
         return
 
-    status_msg = await msg.reply_text("🔎 بدأ المسح...")
+    status = await msg.reply_text("🔎 جارٍ قراءة آخر إشارات القناة وفحص عقودها...")
 
-    async def progress(text: str) -> None:
-        await status_msg.edit_text(text)
+    async def progress(txt: str) -> None:
+        try:
+            await status.edit_text(txt)
+        except Exception:
+            pass
 
-    res = None
+    manual_map = _manual_store(bd, user.id)
+    force_all = bool(context.args and "all" in [a.lower() for a in context.args])
+    watched_mints = {
+        it["mint"] for it in (bd.get("watch") or {}).values()
+        if it["uid"] == user.id and not it.get("off")
+    }
+    extra = [s for s in manual_map.values() if force_all or not s.done]
+
+    async with lock:
+        try:
+            res = await run_scan(bd["http"], progress=progress, extra=extra)
+        except Exception:
+            log.exception("scan failed")
+            await safe_edit(status, msg, "❌ حدث خطأ أثناء الفحص. راجع Logs في Render.")
+            return
+    for s in extra:
+        s.done = True
     try:
-        uid = update.effective_user.id
-        force_all = bool(context.args) and context.args[0].lower() in ("all", "الكل")
-        mstore = _manual_store(bd, uid)
-        extras = [s for s in mstore.values() if force_all or not s.done]   # الجديد فقط
-        had_done = any(s.done for s in mstore.values())
-        cached = bd.get("last_scan") if not extras else None
-        if cached and time.time() - cached.finished_at < SCAN_CACHE_SEC:
-            res = cached
-        else:
-            async with bd["scan_lock"]:
-                res = await asyncio.wait_for(
-                    run_scan(bd["http"], progress, SCAN_BUDGET_SEC, extras), timeout=SCAN_BUDGET_SEC + 30
-                )
-                bd["last_scan"] = res if (res.discovered > 0 and not extras) else None
-
-        if res.discovered > 0:
-            for s in extras:
-                s.done = True
-        if res.signals == 0 and had_done and not extras:
-            text = (
-                "ℹ️ لا توجد عقود جديدة منذ آخر تحليل.\n"
-                "العقود السابقة ما زالت تحت المراقبة (/watchlist) ولن أعيد تحليلها.\n"
-                "الصق عقوداً جديدة ثم /best، أو أرسل /best all لإعادة تحليل الكل."
-            )
-        elif res.signals == 0:
-            text = format_no_signals(res)
-        elif res.discovered == 0:
-            text = (
-                f"⚠️ وجدتُ {res.signals} عقداً لكن لم أحصل على بيانات سوق لأي منها.\n\n"
-                f"حالة المصادر:\n{api_status_text()}\n\n"
-                "• HTTP 403/429 أو timeout ⇒ المشكلة في اتصال سيرفر Render بالمصدر (جرّب بعد دقيقة).\n"
-                "• HTTP 200 ⇒ العقود غير مدرجة بعد (جديدة جداً أو ما زالت قبل الإدراج).\n"
-                "شغّل /diag لاختبار المصادر مباشرة."
-            )
-        elif res.ranked:
-            best = res.ranked[0]
-            alts, seen = [], {best.m["mint"]}
-            for c in res.ranked[1:]:
-                if c.m["mint"] in seen:
-                    continue
-                seen.add(c.m["mint"])
-                alts.append(c)
-                if len(alts) == 2:
-                    break
-            text = format_best(best, alts)
-        else:
-            text = format_no_result(res)
-    except asyncio.TimeoutError:
-        text = "⌛ انتهت مهلة المسح (المصادر بطيئة). حاول مجدداً بعد قليل."
+        record_scan(bd, user.id, msg.chat_id, res)
     except Exception:
-        log.exception("Scan failed")
-        text = "❌ حدث خطأ أثناء المسح. حاول مجدداً بعد قليل."
+        log.exception("record_scan failed")
 
-    await safe_edit(status_msg, msg, text)
-    if res is not None and (res.verdicts or res.unresolved):
+    if not res.signals:
+        await safe_edit(status, msg, format_no_signals(res))
+        return
+
+    bd["last_scan"] = res
+
+    new_ranked = [c for c in res.ranked if force_all or c.m["mint"] not in watched_mints]
+    skipped_watched = len(res.ranked) - len(new_ranked)
+
+    if not new_ranked:
+        base_txt = format_no_result(res)
+        if skipped_watched:
+            base_txt += f"\n\n👁 تم استبعاد {skipped_watched} عملة لأنها بالفعل تحت المراقبة (أرسل /best all لإعادة تحليلها)."
+        await safe_edit(status, msg, base_txt)
         await safe_send(msg, format_verdicts(res))
-    if res is not None and res.watch:
-        added = add_watch(bd, update.effective_user.id, update.effective_chat.id, res.watch)
+        return
+
+    best = new_ranked[0]
+    seen_alts: set = set()
+    alts: list = []
+    for c in new_ranked[1:]:
+        if c.m["mint"] != best.m["mint"] and c.m["mint"] not in seen_alts:
+            seen_alts.add(c.m["mint"])
+            alts.append(c)
+            if len(alts) == 2:
+                break
+    out_txt = format_best(best, alts)
+    if skipped_watched:
+        out_txt += f"\n\n<i>ℹ️ {skipped_watched} عملة أخرى ضمن المراقبة تم تجاوزها (أرسل /best all لإعادة فحصها).</i>"
+    await safe_edit(status, msg, out_txt)
+    await safe_send(msg, format_verdicts(res))
+    if res.watch:
+        added = add_watch(bd, user.id, msg.chat_id, res.watch)
         if added:
             await safe_send(msg, format_watch_added(added))
-    if res is not None and res.signals and res.discovered:
-        try:
-            record_scan(bd, update.effective_user.id, update.effective_chat.id, res)
-        except Exception:
-            log.exception("record_scan failed")
 
 
 async def diag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     msg = update.effective_message
-    bd = context.application.bot_data
-
-    wait = _cooldown_wait(bd, update.effective_user.id)
-    if wait:
-        await msg.reply_text(f"⏱️ انتظر {wait} ثانية.")
+    if msg is None:
         return
+    status = await msg.reply_text("🔬 جارٍ تشخيص مصدر القراءة وفلترة العقود...")
+    client = context.application.bot_data["http"]
+    sigs, info = await discover_signals(client)
 
-    status_msg = await msg.reply_text("🧪 جارٍ تشخيص قراءة القناة ...")
-    try:
-        async with bd["scan_lock"]:
-            client = bd["http"]
-            signals, info = await asyncio.wait_for(discover_signals(client), timeout=60)
-            addrs = [s.mint for s in signals]
-            hints = [s.mint for s in signals if s.is_hint]
-            sink: dict = {}
-            if addrs:
-                try:
-                    await asyncio.wait_for(fetch_pairs(client, addrs, hints, sink), timeout=40)
-                except asyncio.TimeoutError:
-                    pass
-            pairs = list(sink.values())
-            probes = await probe_apis(client)
-        stats: Counter = Counter()
-        passed = 0
+    lines = [
+        "🔬 <b>تشخيص القناة والفلترة</b>",
+        f"• القناة: @{html.escape(SIGNAL_CHANNEL)} | الحد: {SIGNAL_MESSAGE_LIMIT} رسالة / {SIGNAL_MAX_AGE_HOURS:.0f}h",
+        f"• جلسة المستخدم: {'مضبوطة' if TG_SESSION else 'غير مضبوطة'} | API ID/Hash: {'نعم' if (TG_API_ID and TG_API_HASH) else 'لا'}",
+        f"• القراءة: {'✅ ناجحة عبر ' + html.escape(info.get('source') or '') if info.get('ok') else '❌ فشلت'}",
+    ]
+    if info.get("error"):
+        lines.append(f"• السبب: {html.escape(str(info['error']))}")
+    elif info.get("errors"):
+        lines.append("• محاولات فاشلة: " + html.escape(" | ".join(info["errors"])))
+    if info.get("newest_age_min") is not None:
+        lines.append(f"• أحدث رسالة مقروءة: {fmt_age(info['newest_age_min'])}")
+    lines += [
+        f"• رسائل مقروءة: {info.get('messages', 0)} (أقدم من النافذة: {info.get('expired', 0)})",
+        f"• رسائل فيها عقود: {info.get('with_addr', 0)} | عقود فريدة: {info.get('addresses', 0)}",
+    ]
+
+    if sigs:
+        sink: dict = {}
+        await fetch_pairs(client, [s.mint for s in sigs], [s.mint for s in sigs if s.is_hint], sink)
+        pairs = list(sink.values())
+        pre_ok = 0
+        reasons: Counter = Counter()
         for p in pairs:
             m = extract_metrics(p)
-            if m is None:
-                stats["بيانات ناقصة"] += 1
+            if not m:
+                reasons["بيانات ناقصة"] += 1
                 continue
-            reason = pre_filter(m)
-            if reason:
-                stats[reason] += 1
+            r = pre_filter(m)
+            if r:
+                reasons[r] += 1
             else:
-                passed += 1
-
-        manual_n = len(_manual_store(bd, update.effective_user.id))
-        age = info.get("newest_age_min")
-        lines = [f"🧪 <b>تشخيص قراءة القناة</b> (@{html.escape(SIGNAL_CHANNEL)})", ""]
-        lines.append(f"• Telethon: {'✅ متصل (جلسة مستخدم)' if TL.get('client') else '❌ غير متصل'}")
-        lines.append(f"• قراءة القناة: {'✅ نجحت عبر ' + str(info['source']) if info['ok'] else '❌ فشلت'}")
-        shown = info["errors"] if not info["ok"] else [e for e in info["errors"] if not e.startswith("Telethon") or info["source"] != "Telethon"]
-        for er in shown[:4]:
-            lines.append(f"   ↳ {html.escape(str(er))}")
+                pre_ok += 1
         lines += [
-            f"• رسائل مقروءة: {info['messages']} ",
-            f"• رسائل فيها عقود: {info['with_addr']}",
-            f"• أحدث رسالة: {fmt_age(age) if age is not None else 'غير معروف'}",
-            f"• عقود أرسلتها يدوياً (منتظرة): {manual_n}",
-            "",
-            f"🔢 عقود فريدة مستخرجة: {len(addrs)} | أزواج DexScreener: {len(pairs)}",
-            f"✅ اجتازت الفلتر الأولي: {passed}",
+            f"• أزواج وُجدت: {len(pairs)} | تجتاز الفلتر الأولي: {pre_ok}",
+            f"• الفلاتر الحالية: سيولة ≥ {fmt_usd(MIN_LIQUIDITY_USD)} • MC {fmt_usd(MIN_MCAP_USD)}–{fmt_usd(MAX_MCAP_USD)} • "
+            f"عمر ≥ {MIN_PAIR_AGE_MIN:.0f}د • vol1h ≥ {fmt_usd(MIN_VOLUME_H1_USD)}",
         ]
-        missing = len(addrs) - len(pairs)
-        if missing > 0 and pairs:
-            lines.append(f"• بلا زوج على DexScreener: ~{missing}")
-        lines += ["", "🌐 <b>اختبار المصادر من السيرفر:</b>"] + [f"• {n}: {r}" for n, r in probes]
-        if stats:
-            lines += ["", "📋 <b>أسباب الاستبعاد:</b>"]
-            for reason, n in stats.most_common(12):
-                lines.append(f"• {html.escape(reason)}: {n}")
-        text = "\n".join(lines)
-    except Exception:
-        log.exception("Diag failed")
-        text = "❌ فشل التشخيص. راجع Logs في Render."
+        if reasons:
+            lines.append("• أسباب الاستبعاد الأولي: " + "، ".join(f"{k} ({v})" for k, v in reasons.most_common()))
+        lines.append("• أحدث 5 عقود: " + ", ".join(f"<code>{s.mint[:6]}…</code>" for s in sigs[:5]))
 
-    await safe_edit(status_msg, msg, text)
+    lines += ["", "<b>اتصال الخدمات الخارجية:</b>"]
+    for name, res_txt in await probe_apis(client):
+        lines.append(f"• {name}: {html.escape(res_txt)}")
+    lines += ["", "<b>آخر استجابة فعلية:</b>", api_status_text()]
+
+    await safe_edit(status, msg, "\n".join(lines))
 
 
-async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    log.error("Unhandled exception", exc_info=context.error)
+# ───────────────────────────── خادم الويب لـ Render + التشغيل ─────────────────────────────
 
 
-# ───────────────────────────── Health server + Keep-alive + التشغيل ─────────────────────────────
+async def _health(_request: web.Request) -> web.Response:
+    return web.Response(text="ok")
 
 
-async def handle_health_check(request: web.Request) -> web.Response:
-    return web.Response(text="OK", status=200)
+async def _keepalive(url: str) -> None:
+    await asyncio.sleep(30)
+    async with httpx.AsyncClient(timeout=10.0) as hc:
+        while True:
+            try:
+                await hc.get(url)
+            except Exception:
+                pass
+            await asyncio.sleep(KEEPALIVE_SEC)
 
 
-async def start_web_server() -> web.AppRunner:
-    app = web.Application()
-    app.router.add_get("/", handle_health_check)
-    app.router.add_get("/health", handle_health_check)
-    runner = web.AppRunner(app)
+async def run_web_and_bot(app: Application) -> None:
+    port = int(os.getenv("PORT", "10000"))
+    web_app = web.Application()
+    web_app.router.add_get("/", _health)
+    web_app.router.add_get("/health", _health)
+    runner = web.AppRunner(web_app)
     await runner.setup()
-    port = int(os.getenv("PORT", "8080"))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    log.info("Health check server running on port %s", port)
-    return runner
+    log.info("Health server listening on 0.0.0.0:%s", port)
 
+    base_url = (os.getenv("RENDER_EXTERNAL_URL") or "").strip().rstrip("/")
+    keep_task = asyncio.create_task(_keepalive(f"{base_url}/health")) if base_url else None
+    watch_task = asyncio.create_task(watch_loop(app))
+    scan_task = asyncio.create_task(scan_loop(app))
+    guard_task = asyncio.create_task(scan_guard_loop(app))
 
-async def keepalive_loop(client: httpx.AsyncClient) -> None:
-    """يمنع نوم خدمة Render المجانية: طلب HTTP دوري على الرابط العام للخدمة."""
-    url = os.getenv("RENDER_EXTERNAL_URL") or os.getenv("SELF_URL")
-    if not url:
-        log.info("Keep-alive disabled (no RENDER_EXTERNAL_URL / SELF_URL)")
-        return
-    target = url.rstrip("/") + "/health"
-    log.info("Keep-alive pinging %s every %ss", target, KEEPALIVE_SEC)
-    while True:
-        await asyncio.sleep(KEEPALIVE_SEC)
+    stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
         try:
-            await client.get(target)
-        except Exception as e:
-            log.warning("Keep-alive failed: %s", e)
+            loop.add_signal_handler(sig, stop_event.set)
+        except NotImplementedError:
+            pass
+
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=False)
+    log.info("Telegram polling started")
+
+    await stop_event.wait()
+    log.info("Shutting down...")
+    for t in (keep_task, watch_task, scan_task, guard_task):
+        if t:
+            t.cancel()
+    await asyncio.gather(*(t for t in (keep_task, watch_task, scan_task, guard_task) if t), return_exceptions=True)
+    await app.updater.stop()
+    await app.stop()
+    await app.shutdown()
+    await runner.cleanup()
 
 
-def _polling_error(exc: Exception) -> None:
-    """يسجّل خطأ الـ polling في سطر واحد واضح بدل Traceback طويل (المكتبة تعيد المحاولة وحدها)."""
-    name = type(exc).__name__
-    if name == "Conflict":
-        log.warning("Polling Conflict: نسخة أخرى تستعمل نفس التوكن (أو نشر قديم لم يُغلق بعد) — %s", str(exc)[:160])
-    else:
-        log.warning("Polling error (%s): %s", name, str(exc)[:200])
+def main() -> None:
+    if not TELEGRAM_BOT_TOKEN:
+        raise SystemExit("TELEGRAM_BOT_TOKEN is required")
 
-
-async def run_all() -> None:
-    app = Application.builder().token(TELEGRAM_BOT_TOKEN).concurrent_updates(True).build()
+    app = (
+        Application.builder()
+        .token(TELEGRAM_BOT_TOKEN)
+        .post_init(post_init)
+        .post_shutdown(post_shutdown)
+        .build()
+    )
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("best", best_cmd))
@@ -4588,58 +4526,15 @@ async def run_all() -> None:
     app.add_handler(CommandHandler("unwatch", unwatch_cmd))
     app.add_handler(CommandHandler("report", report_cmd))
     app.add_handler(CommandHandler("export", export_cmd))
+    app.add_handler(CommandHandler("scan", scan_cmd))
     app.add_handler(CommandHandler("scan_on", scan_on_cmd))
     app.add_handler(CommandHandler("scan_off", scan_off_cmd))
-    app.add_handler(CommandHandler("scan", scan_cmd))
     app.add_handler(CommandHandler("scan_now", scan_now_cmd))
+    app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, register_chat), group=-1)
     app.add_handler(CommandHandler("missed", missed_cmd))
-    app.add_handler(MessageHandler(filters.ALL, register_chat), group=-1)
-    app.add_handler(MessageHandler(
-        filters.ChatType.PRIVATE & ~filters.COMMAND & (filters.TEXT | filters.CAPTION), on_user_message
-    ))
-    app.add_error_handler(on_error)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_user_message))
 
-    runner = await start_web_server()
-    await app.initialize()
-    await post_init(app)
-    await app.start()
-    await app.updater.start_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True,
-                                    error_callback=_polling_error)
-    keepalive = asyncio.create_task(keepalive_loop(app.bot_data["http"]))
-    watcher = asyncio.create_task(watch_loop(app))
-    scanner = asyncio.create_task(scan_loop(app))
-    guard = asyncio.create_task(scan_guard_loop(app))
-    log.info("SolAlpha Sniper v5.1 is running — signal channel: @%s", SIGNAL_CHANNEL)
-
-    stop = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(sig, stop.set)
-        except (NotImplementedError, RuntimeError):
-            pass
-
-    try:
-        await stop.wait()
-    finally:
-        log.info("Shutting down...")
-        keepalive.cancel()
-        watcher.cancel()
-        scanner.cancel()
-        guard.cancel()
-        try:
-            await app.updater.stop()
-            await app.stop()
-            await post_shutdown(app)
-            await app.shutdown()
-        finally:
-            await runner.cleanup()
-
-
-def main() -> None:
-    if not TELEGRAM_BOT_TOKEN:
-        raise SystemExit("TELEGRAM_BOT_TOKEN غير مضبوط في متغيرات البيئة.")
-    asyncio.run(run_all())
+    asyncio.run(run_web_and_bot(app))
 
 
 if __name__ == "__main__":
